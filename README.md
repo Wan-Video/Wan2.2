@@ -45,6 +45,7 @@ If your research or project builds upon [**Wan2.1**](https://github.com/Wan-Vide
 
 - [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) provides comprehensive support for Wan 2.2, including low-GPU-memory layer-by-layer offload, FP8 quantization, sequence parallelism, LoRA training, full training.
 - [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is an alternative implementation of Wan models for ComfyUI. Thanks to its Wan-only focus, it's on the frontline of getting cutting edge optimizations and hot research features, which are often hard to integrate into ComfyUI quickly due to its more rigid structure.
+- [FastVideo](https://github.com/hao-ai-lab/FastVideo) includes distilled Wan models with sparse attention that significanly speed up the inference time. 
 
 
 ## 📑 Todo List
