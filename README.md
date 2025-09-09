@@ -70,7 +70,7 @@ If your research or project builds upon [**Wan2.1**](https://github.com/Wan-Vide
     - [x] Inference code of Wan2.2-S2V
     - [x] Checkpoints of Wan2.2-S2V-14B
     - [ ] ComfyUI integration
-    - [ ] Diffusers integration
+    - [x] Diffusers integration
 
 ## Run Wan2.2
 
