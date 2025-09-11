@@ -1,29 +1,82 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-
-# changed to run inference on 8GB VRAM (generated frames limited to 21-25, increase if you have more VRAM)
-import gc
 import math
 import os
+import gc
+from torch.cuda.amp import autocast
+import safetensors.torch
+from collections import OrderedDict
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    overload,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+)
+
+import itertools
+import warnings
+
 import torch
 import torch.nn as nn
-import safetensors.torch
-
-from safetensors import safe_open
-from typing import List
-
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
 
-#from line_profiler import profile
+from safetensors import safe_open
+from collections import defaultdict
+
+from line_profiler import profile
 #from memory_profiler import profile
+
+import json
+
+import os
+from safetensors import safe_open
+from io import BytesIO
+import torch
+import psutil
+import time
+
+import torch
+import gc  # Import Python's garbage collector
+
+# from lru import LRU
+from cachetools import LRUCache
+from line_profiler import profile
+
+# gpu_tensor_cache = LRU(size=1500)  # 1400
+
+# gpu_tensor_cache_linear_bias = LRU(size=1)
+
+# gpu_tensor_cache_linear = LRU(size=35) last
+# test
+gpu_tensor_cache_linear = LRUCache(maxsize=35)
+
+
+
+cpu = torch.device('cpu')
+gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+
+
+m_id = 0
 
 
 class DynamicSwapInstaller:
     @staticmethod
     def _install_module(module: torch.nn.Module, **kwargs):
+        global m_id, used_weights
         original_class = module.__class__
+        original_class_str = str(original_class)
+        module_id = str(m_id)
+        m_id += 1
         module.__dict__['forge_backup_original_class'] = original_class
 
         def hacked_get_attr(self, name: str):
@@ -50,6 +103,12 @@ class DynamicSwapInstaller:
         return
 
     @staticmethod
+    def print_stats():
+        global gpu_tensor_cache_linear
+        # clear cache
+        gpu_tensor_cache_linear = LRUCache(maxsize=35)
+
+    @staticmethod
     def _uninstall_module(module: torch.nn.Module):
         if 'forge_backup_original_class' in module.__dict__:
             module.__class__ = module.__dict__.pop('forge_backup_original_class')
@@ -61,9 +120,10 @@ class DynamicSwapInstaller:
         for m in model.modules():
             count_modules += 1
             DynamicSwapInstaller._install_module(m, **kwargs)
-        print("installed modules " + str(count_modules) + "\n")
+        print("installed modules" + str(count_modules) + "\n")
         return
 
+    @profile
     @staticmethod
     def uninstall_model(model: torch.nn.Module):
         for m in model.modules():
@@ -85,6 +145,165 @@ def print_model_size(model):
     total_size = total_params * 2  # Assuming float16 (2 bytes per parameter)
     size_mb = total_size / (1024 * 1024)
     print(f"Model size: {size_mb:.2f} MB ({total_params:,} parameters)")
+
+
+class SelectiveCache:
+    def __init__(self, file_paths, max_cache_gb=16):
+        self.file_paths = file_paths
+        self.max_cache_bytes = max_cache_gb * 1024 ** 3  # Convert GB to bytes
+        self.python_cache = {}  # For most critical files
+        self.os_cache_files = []  # Files to preload into OS cache
+        self.uncached_files = []  # Files to load on-demand
+
+        # Default priorities (can be customized)
+        self.priorities = self._assign_default_priorities()
+
+    def _assign_default_priorities(self):
+        """Assign priorities based on file index (first files are most important)"""
+        priorities = {}
+        for i, path in enumerate(self.file_paths):
+            # First 12 files: highest priority (Python cache)
+            if i < 12:
+                priorities[path] = 3
+            # Next 12 files: medium priority (OS cache)
+            elif i < 24:
+                priorities[path] = 2
+            # Remaining files: low priority (on-demand)
+            else:
+                priorities[path] = 1
+        return priorities
+
+    def _get_file_size(self, path):
+        """Get file size in bytes"""
+        return os.path.getsize(path)
+
+    def optimize_cache_allocation(self):
+        """Determine optimal cache allocation based on available RAM"""
+        total_size = sum(self._get_file_size(p) for p in self.file_paths)
+        available_ram = psutil.virtual_memory().available
+
+        # Calculate how much we can cache
+        usable_ram = min(available_ram * 0.8, self.max_cache_bytes)  # Use 80% of available RAM
+
+        # Sort files by priority (highest first)
+        sorted_files = sorted(self.file_paths,
+                              key=lambda p: (self.priorities[p], -self._get_file_size(p)),
+                              reverse=True)
+
+        # Allocate to Python cache (highest priority)
+        python_cache_size = 0
+        self.python_cache_files = []
+
+        for path in sorted_files:
+            file_size = self._get_file_size(path)
+            if self.priorities[path] == 3 and python_cache_size + file_size <= usable_ram * 0.5:
+                self.python_cache_files.append(path)
+                python_cache_size += file_size
+
+        # Allocate to OS cache (medium priority)
+        os_cache_size = 0
+        self.os_cache_files = []
+
+        for path in sorted_files:
+            file_size = self._get_file_size(path)
+            if (self.priorities[path] == 2 and
+                    path not in self.python_cache_files and
+                    os_cache_size + file_size <= usable_ram * 0.3):
+                self.os_cache_files.append(path)
+                os_cache_size += file_size
+
+        # Remaining files are loaded on-demand
+        self.uncached_files = [p for p in self.file_paths
+                               if p not in self.python_cache_files
+                               and p not in self.os_cache_files]
+
+        return {
+            'python_cache_files': len(self.python_cache_files),
+            'python_cache_size_gb': python_cache_size / 1024 ** 3,
+            'os_cache_files': len(self.os_cache_files),
+            'os_cache_size_gb': os_cache_size / 1024 ** 3,
+            'uncached_files': len(self.uncached_files),
+            'uncached_size_gb': sum(self._get_file_size(p) for p in self.uncached_files) / 1024 ** 3
+        }
+
+    def preload_caches(self):
+        """Preload files into Python and OS caches"""
+        # Preload into Python cache
+        print("Preloading files into Python cache...")
+        for path in self.python_cache_files:
+            print(f"Caching {path} ({self._get_file_size(path) / 1024 / 1024:.1f} MB)")
+            with open(path, 'rb') as f:
+                self.python_cache[path] = f.read()
+
+        # Preload into OS cache
+        print("\nPreloading files into OS cache...")
+        for path in self.os_cache_files:
+            print(f"Reading {path} ({self._get_file_size(path) / 1024 / 1024:.1f} MB)")
+            with open(path, 'rb') as f:
+                f.read()  # Read entire file to populate OS cache
+
+        print("\nCache preloading complete!")
+
+    def load_state_dict_(self, file_path):
+        """Load state dict from file, using appropriate caching strategy"""
+        if file_path in self.python_cache:
+            # Load from Python cache
+            data = BytesIO(self.python_cache[file_path])
+            with safe_open(data, framework="pt") as f:
+                return {key: f.get_tensor(key).to('cuda') for key in f.keys()}
+        else:
+            # Load from disk (memory-mapped for efficiency)
+            with safe_open(file_path, framework="pt") as f:
+                return {key: f.get_tensor(key).to('cuda') for key in f.keys()}
+
+    def load_state_dict(self, file_path):
+        """
+        Load state dict from file with detailed timing for CPU and CUDA operations.
+        """
+        if file_path in self.python_cache:
+            print(f"Loading {file_path} from Python cache...")
+            # This part remains the same as it's already optimized
+            data = BytesIO(self.python_cache[file_path])
+            with safe_open(data, framework="pt") as f:
+                return {key: f.get_tensor(key).to('cuda') for key in f.keys()}
+        else:
+            print(f"Loading {file_path} from disk/OS cache...")
+            t0 = time.time()
+
+            # Step 1: Memory-map the file and create CPU tensors
+            cpu_tensors = {}
+            with safe_open(file_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    cpu_tensors[key] = f.get_tensor(key)
+
+            t1 = time.time()
+
+            # Step 2: Move the created CPU tensors to the GPU
+            cuda_tensors = {key: tensor.to('cuda') for key, tensor in cpu_tensors.items()}
+            torch.cuda.synchronize()  # Important: Wait for the transfer to complete
+
+            t2 = time.time()
+
+            print(f"  - CPU loading/deserialization took: {t1 - t0:.4f} seconds.")
+            print(f"  - CUDA transfer took: {t2 - t1:.4f} seconds.")
+            print(f"Loaded from disk/OS cache in {t2 - t0:.4f} seconds.")
+
+            return cuda_tensors
+
+    def print_cache_status(self):
+        """Print current cache status"""
+        python_size = sum(len(v) for v in self.python_cache.values()) / 1024 ** 3
+        os_size = sum(self._get_file_size(p) for p in self.os_cache_files) / 1024 ** 3
+        uncached_size = sum(self._get_file_size(p) for p in self.uncached_files) / 1024 ** 3
+
+        print("\n=== Cache Status ===")
+        print(f"Python Cache: {len(self.python_cache_files)} files ({python_size:.2f} GB)")
+        print(f"OS Cache: {len(self.os_cache_files)} files ({os_size:.2f} GB)")
+        print(f"On-Demand: {len(self.uncached_files)} files ({uncached_size:.2f} GB)")
+        print(f"Total Cached: {python_size + os_size:.2f} GB")
+        print(f"Available RAM: {psutil.virtual_memory().available / 1024 ** 3:.2f} GB")
+
+
 
 
 __all__ = ['WanModel']
@@ -112,6 +331,28 @@ def rope_params(max_seq_len, dim, theta=10000):
                         torch.arange(0, dim, 2).to(torch.float64).div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
+
+
+@torch.amp.autocast('cuda', enabled=False)
+def rope_params_working(max_seq_len, dim, theta=10000):
+    """
+    Calculates RoPE frequencies. Optimized for performance by using float32,
+    which is the most efficient data type supported by torch.polar.
+    """
+    assert dim % 2 == 0
+
+    inv_freq = 1.0 / torch.pow(
+        theta,
+        torch.arange(0, dim, 2, dtype=torch.float32) / dim
+    )
+
+    t = torch.arange(max_seq_len, dtype=torch.float32)
+
+    freqs = torch.outer(t, inv_freq)
+
+    freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
+
+    return freqs_complex
 
 
 @torch.amp.autocast('cuda', enabled=False)
@@ -143,6 +384,66 @@ def rope_apply(x, grid_sizes, freqs):
         # append to collection
         output.append(x_i)
     return torch.stack(output).float()
+
+
+@torch.amp.autocast('cuda', enabled=False)
+def rope_apply_working(x, grid_sizes, freqs):
+    """
+    Applies Rotary Positional Embeddings to the input tensor x.
+    This function forces internal calculations to float32 to be compatible
+    with torch.view_as_complex, which does not support bfloat16.
+    """
+    # Get the original dtype of the input tensor (e.g., bfloat16) to convert back to at the end.
+    original_dtype = x.dtype
+    n, c = x.size(2), x.size(3) // 2
+
+    # split freqs (freqs is a complex64 tensor from rope_params)
+    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    # loop over samples in the batch
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
+
+        # --- CRITICAL FIX START ---
+        # 1. Isolate the part of the tensor we need to modify.
+        x_to_rotate = x[i, :seq_len]
+
+        # 2. Convert it to a supported dtype (float32) for the complex view.
+        #    The reshape operation requires the last dimension to be 2 for real/imaginary parts.
+        x_to_rotate_float32 = x_to_rotate.float().reshape(seq_len, n, -1, 2)
+
+        # 3. Perform the unsupported operation in float32.
+        x_i_complex = torch.view_as_complex(x_to_rotate_float32)
+
+        # --- CRITICAL FIX END ---
+
+        # The rest of the calculation can now proceed.
+        # The freqs tensor is already complex64, which is compatible with complex32.
+        freqs_i = torch.cat([
+            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ], dim=-1).reshape(seq_len, 1, -1).to(x_i_complex.device)  # Ensure freqs are on the right device
+
+        # Apply rotary embedding via complex multiplication
+        x_i_rotated_complex = x_i_complex * freqs_i
+
+        # Convert the result back to a real tensor and flatten the head dimension.
+        x_i_rotated_real = torch.view_as_real(x_i_rotated_complex).flatten(2)
+
+        # If there are any parts of the sequence we didn't rotate (e.g., padding),
+        # concatenate them back.
+        if seq_len < x.size(1):
+            x_i_final = torch.cat([x_i_rotated_real, x[i, seq_len:]], dim=0)
+        else:
+            x_i_final = x_i_rotated_real
+
+        # append to collection
+        output.append(x_i_final)
+
+    # Stack the results and cast the entire final tensor back to the original input dtype.
+    return torch.stack(output).to(original_dtype)
 
 
 class WanRMSNorm(nn.Module):
@@ -259,6 +560,7 @@ class WanCrossAttention(WanSelfAttention):
         return x
 
 
+# original
 class WanAttentionBlock(nn.Module):
 
     def __init__(self,
@@ -338,6 +640,64 @@ class WanAttentionBlock(nn.Module):
         return x
 
 
+class WanAttentionBlock_working(nn.Module):
+
+    def __init__(self,
+                 dim,
+                 ffn_dim,
+                 num_heads,
+                 window_size=(-1, -1),
+                 qk_norm=True,
+                 cross_attn_norm=False,
+                 eps=1e-6):
+        super().__init__()
+        self.dim = dim
+        self.ffn_dim = ffn_dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.qk_norm = qk_norm
+        self.cross_attn_norm = cross_attn_norm
+        self.eps = eps
+
+        # Layers (structure remains unchanged)
+        self.norm1 = WanLayerNorm(dim, eps)
+        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
+                                          eps)
+        self.norm3 = WanLayerNorm(
+            dim, eps,
+            elementwise_affine=True) if cross_attn_norm else nn.Identity()
+        self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm,
+                                            eps)
+        self.norm2 = WanLayerNorm(dim, eps)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
+            nn.Linear(ffn_dim, dim))
+
+        # Modulation (structure remains unchanged)
+        self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim ** 0.5)
+
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+        # We no longer need to move individual parts. The whole block is on the GPU.
+        e_chunks = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
+
+        # --- Part A: Self-Attention ---
+        norm1_out = self.norm1(x)
+        self_attn_in = norm1_out * (1 + e_chunks[1].squeeze(2)) + e_chunks[0].squeeze(2)
+        y = self.self_attn(self_attn_in, seq_lens, grid_sizes, freqs)
+        x = x + y * e_chunks[2].squeeze(2)
+
+        # --- Part B: Cross-Attention and FFN ---
+        cross_attn_out = self.cross_attn(self.norm3(x), context, context_lens)
+        x = x + cross_attn_out
+
+        norm2_out = self.norm2(x)
+        ffn_in = norm2_out * (1 + e_chunks[4].squeeze(2)) + e_chunks[3].squeeze(2)
+        y = self.ffn(ffn_in)
+        x = x + y * e_chunks[5].squeeze(2)
+
+        return x
+
+
 class Head(nn.Module):
 
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
@@ -369,6 +729,13 @@ class Head(nn.Module):
                     self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)))
         return x
 
+from concurrent.futures import ThreadPoolExecutor
+
+def load_tensor_to_gpu(file_path, key):
+    with safe_open(file_path, framework="pt") as f:
+        return f.get_tensor(key).to('cuda')
+
+
 
 class WanModel(ModelMixin, ConfigMixin):
     r"""
@@ -380,47 +747,50 @@ class WanModel(ModelMixin, ConfigMixin):
     ]
     _no_split_modules = ['WanAttentionBlock']
 
-    def clear_mem(self):
-        self.blocks = None
-        for i in range(40):
-            if getattr(self, f"blocks{i}"):
-                delattr(self, f"blocks{i}")
-
-        self.patch_embedding = None
-        self.text_embedding = None
-        self.time_embedding = None
-        self.time_projection = None
-        self.head = None
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    def _load_and_move_part_v1(self, part_name: str, part_class, *args, **kwargs):
+    @profile
+    def _load_and_move_part(self, part_name: str, part_class, *args, **kwargs):
+        # split files 5-10% faster
         file_path = self.model_path + part_name + '.safetensors'
-        attr_name = part_name.replace(".", "")
 
-        if getattr(self, attr_name):
-            return
+        attr_name = part_name
+        if part_name.split(".")[0] == "blocks":
+            attr_name = "blocks"
 
-        part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
-        with torch.device("meta"):
-            layer = part_class(*args, **kwargs)
-        layer = layer.to_empty(device="cpu")
-
-        if part_name.split(".")[0] == "blocks" and int(part_name.split(".")[1]) > 40 - self.blocks_in_ram:
+        if not getattr(self, attr_name):
+            part_state_dict = safetensors.torch.load_file(file_path, device="cpu")
+            with torch.device("meta"):
+                layer = part_class(*args, **kwargs)
+            layer = layer.to_empty(device="cpu")
             layer.load_state_dict(part_state_dict, assign=True)
+            layer.to('cuda', non_blocking=True)  # 32% faster with non_blocking=True
             setattr(self, attr_name, layer)
-            DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
         else:
-            if part_name.split(".")[0] == "blocks":
-                attr_name = "blocks"
-            if getattr(self, attr_name, layer):
-                getattr(self, attr_name, layer).load_state_dict(part_state_dict, assign=True)
-            else:
-                layer.load_state_dict(part_state_dict, assign=True)
-                setattr(self, attr_name, layer)
-                DynamicSwapInstaller.install_model(getattr(self, attr_name), device="cuda")
+            # v1
+            #self.load_all_parts_parallel([file_path], [attr_name])  # same speed as v2
 
+            # v2
+            part_state_dict = safetensors.torch.load_file(file_path, device="cuda")
+            getattr(self, attr_name).load_state_dict(part_state_dict, assign=True)
+
+            # v3
+            #state_dict = self.cache.load_state_dict(file_path)
+            #getattr(self, attr_name).load_state_dict(state_dict, assign=True)
         return
+
+    def load_all_parts_parallel(self, file_paths, attr_names):
+        with ThreadPoolExecutor(max_workers=4) as executor:  # Adjust workers based on SSD
+            for file_path, attr_name in zip(file_paths, attr_names):
+                with safe_open(file_path, framework="pt") as f:
+                    # Submit all tensor loads to thread pool
+                    futures = {
+                        key: executor.submit(load_tensor_to_gpu, file_path, key)
+                        for key in f.keys()
+                    }
+
+                    # Build state_dict from completed futures
+                    state_dict = {key: future.result() for key, future in futures.items()}
+
+                getattr(self, attr_name).load_state_dict(state_dict, assign=True)
 
     @register_to_config
     def __init__(self,
@@ -438,8 +808,7 @@ class WanModel(ModelMixin, ConfigMixin):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6,
-                 blocks_in_ram=0):
+                 eps=1e-6):
         r"""
         Initialize the diffusion model backbone.
 
@@ -479,18 +848,11 @@ class WanModel(ModelMixin, ConfigMixin):
         super().__init__()
 
         if model_type == 't2v_h':
+            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/high_noise_model_/"
             model_type = 't2v'
-            # todo replace with your path to converted models see: optimize_files.py
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/high_noise_model/"
-            gc.collect()
-            torch.cuda.empty_cache()
-
         if model_type == 't2v_l':
+            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/low_noise_model_/"
             model_type = 't2v'
-            # todo replace with your path to converted models see: optimize_files.py
-            self.model_path = "C:/nginx/html/src/Wan2.2/Wan2.2-T2V-A14B/low_noise_model/"
-            gc.collect()
-            torch.cuda.empty_cache()
 
         assert model_type in ['t2v', 'i2v', 'ti2v', 's2v']
         self.model_type = model_type
@@ -511,73 +873,43 @@ class WanModel(ModelMixin, ConfigMixin):
         self.eps = eps
 
         # embeddings
-        self.patch_embedding = None
-        #self.patch_embedding = nn.Conv3d(
-        #    in_dim, dim, kernel_size=patch_size, stride=patch_size)
-        self.text_embedding = None
-        #self.text_embedding = nn.Sequential(
-        #    nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-        #    nn.Linear(dim, dim))
+        #self.patch_embedding = None
+        self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
 
-        self.time_embedding = None
-        #self.time_embedding = nn.Sequential(
-        #    nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = None
-        #self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        #self.text_embedding = None
+        self.text_embedding = nn.Sequential(
+            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
+            nn.Linear(dim, dim))
+
+        #self.time_embedding = None
+        self.time_embedding = nn.Sequential(
+            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
+
+        #self.time_projection = None
+        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
-        self.blocks = None
-        self.blocks0 = None
-        self.blocks1 = None
-        self.blocks2 = None
-        self.blocks3 = None
-        self.blocks4 = None
-        self.blocks5 = None
-        self.blocks6 = None
-        self.blocks7 = None
-        self.blocks8 = None
-        self.blocks9 = None
-        self.blocks10 = None
-        self.blocks11 = None
-        self.blocks12 = None
-        self.blocks13 = None
-        self.blocks14 = None
-        self.blocks15 = None
-        self.blocks16 = None
-        self.blocks17 = None
-        self.blocks18 = None
-        self.blocks19 = None
-        self.blocks20 = None
-        self.blocks21 = None
-        self.blocks22 = None
-        self.blocks23 = None
-        self.blocks24 = None
-        self.blocks25 = None
-        self.blocks26 = None
-        self.blocks27 = None
-        self.blocks28 = None
-        self.blocks29 = None
-        self.blocks30 = None
-        self.blocks31 = None
-        self.blocks32 = None
-        self.blocks33 = None
-        self.blocks34 = None
-        self.blocks35 = None
-        self.blocks36 = None
-        self.blocks37 = None
-        self.blocks38 = None
-        self.blocks39 = None
-
-
-        #self.blocks = nn.ModuleList([
-        #    WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
-        #                      cross_attn_norm, eps) for _ in range(num_layers)
-        #])
+        #self.blocks = None
+        self.blocks = nn.ModuleList([
+            WanAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm,
+                              cross_attn_norm, eps) for _ in range(num_layers)
+        ])
 
         # head
-        self.head = None
-        #self.head = Head(dim, out_dim, patch_size, eps)
+        #self.head = None
+        self.head = Head(dim, out_dim, patch_size, eps)
 
+        # List your SafeTensors files
+        #file_paths = [f"./Wan2.2-T2V-A14B/high_noise_model_/blocks.{i}.safetensors" for i in range(40)]
+        #cache = SelectiveCache(file_paths, max_cache_gb=16)
+        #allocation = cache.optimize_cache_allocation()
+        #print("\n=== Cache Allocation ===")
+        #print(f"Python Cache: {allocation['python_cache_files']} files ({allocation['python_cache_size_gb']:.2f} GB)")
+        #print(f"OS Cache: {allocation['os_cache_files']} files ({allocation['os_cache_size_gb']:.2f} GB)")
+        #print(f"On-Demand: {allocation['uncached_files']} files ({allocation['uncached_size_gb']:.2f} GB)")
+        #cache.preload_caches()
+        #cache.print_cache_status()
+        #self.cache = cache
 
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
@@ -590,14 +922,11 @@ class WanModel(ModelMixin, ConfigMixin):
         ],
                                dim=1)
 
-        self.blocks_in_ram = blocks_in_ram
-        print(f"RAM available for {self.blocks_in_ram}/40 blocks")
-
-        self.is_low_mem = True
         # initialize weights
         #self.init_weights()
 
     # batch forward
+    @profile
     def forward(
             self,
             x,
@@ -610,7 +939,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # --- Part 1: Embeddings ---
         if not self.patch_embedding:
             print("Loading patch_embedding to CUDA...")
-            self._load_and_move_part_v1(
+            self._load_and_move_part(
                 "patch_embedding", nn.Conv3d,
                 in_channels=self.in_dim, out_channels=self.dim,
                 kernel_size=self.patch_size, stride=self.patch_size
@@ -624,55 +953,55 @@ class WanModel(ModelMixin, ConfigMixin):
         x = [self.patch_embedding(u.unsqueeze(0).to(device)) for u in x]
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+        print_tensor_size(grid_sizes)
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
+        print_tensor_size(seq_lens)
         x = torch.cat(
             [torch.cat(
                 [u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
 
-        if self.is_low_mem:
-            self.patch_embedding = None
-            # gc.collect()
-            torch.cuda.empty_cache()
+        #del self.patch_embedding
+        # gc.collect()
+        #torch.cuda.empty_cache()
 
         if not self.time_embedding:
             print("Loading time_embedding to CUDA...")
-            self._load_and_move_part_v1("time_embedding", nn.Sequential,
+            self._load_and_move_part("time_embedding", nn.Sequential,
                                      nn.Linear(self.freq_dim, self.dim),
                                      nn.SiLU(),
                                      nn.Linear(self.dim, self.dim))
         if not self.time_projection:
             print("Loading time_projection to CUDA...")
-            self._load_and_move_part_v1("time_projection", nn.Sequential,
+            self._load_and_move_part("time_projection", nn.Sequential,
                                      nn.SiLU(),
                                      nn.Linear(self.dim, self.dim * 6))
 
-        print("device")
         t_device = t.to(device)
-        print(device)
-        print(t_device)
         if t_device.dim() == 1:
             t_device = t_device.expand(t_device.size(0), seq_len)
         sin_embed = sinusoidal_embedding_1d(self.freq_dim,
                                             t_device.flatten()).unflatten(0, (t_device.size(0), seq_len))
+        print_tensor_size(sin_embed)
         target_dtype = self.time_embedding[0].weight.dtype
         sin_embed = sin_embed.to(device, dtype=target_dtype)
 
         e = self.time_embedding(sin_embed)
+        print_tensor_size(e)
 
         del sin_embed
 
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+        print_tensor_size(e0)
 
-        if self.is_low_mem:
-            self.time_embedding = None
-            self.time_projection = None
-            gc.collect()
-            torch.cuda.empty_cache()
+        #self.time_embedding = None
+        #self.time_projection = None
+        # gc.collect()
+        #torch.cuda.empty_cache()
 
         if not self.text_embedding:
             print("Loading text_embedding to CUDA...")
-            self._load_and_move_part_v1("text_embedding", nn.Sequential,
+            self._load_and_move_part("text_embedding", nn.Sequential,
                                      nn.Linear(self.text_dim, self.dim),
                                      nn.GELU(approximate='tanh'),
                                      nn.Linear(self.dim, self.dim))
@@ -685,10 +1014,9 @@ class WanModel(ModelMixin, ConfigMixin):
             torch.stack(
                 [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context_null]).to(device)
         )
-        if self.is_low_mem:
-            self.text_embedding = None
-            gc.collect()
-            torch.cuda.empty_cache()
+        #del self.text_embedding
+        # gc.collect()
+        #torch.cuda.empty_cache()
 
         # --- Part 2: Main Blocks Loop ---
         kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.freqs.to(device), context=context, context_lens=None)
@@ -699,41 +1027,32 @@ class WanModel(ModelMixin, ConfigMixin):
 
         x_null = x.clone()
         for i in range(self.num_layers):
-            block_name = f"blocks.{i}"
-            print(f"Loading {block_name} to CUDA")
+            #if i > 9:
+            #    continue
 
-            if i > 40 - self.blocks_in_ram:
-                self._load_and_move_part_v1(
-                    block_name, WanAttentionBlock,
-                    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
-                    window_size=self.window_size, qk_norm=self.qk_norm,
-                    cross_attn_norm=self.cross_attn_norm, eps=self.eps
-                )
-                #block = getattr(self, f"blocks1")
-                block = getattr(self, f"blocks{i}")
-            else:
-                self._load_and_move_part_v1(
-                    block_name, WanAttentionBlock,
-                    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
-                    window_size=self.window_size, qk_norm=self.qk_norm,
-                    cross_attn_norm=self.cross_attn_norm, eps=self.eps
-                )
-                block = getattr(self, "blocks")
+            #block_name = f"blocks.{i}"
+            #print(f"Loading {block_name} to CUDA")
+            #self._load_and_move_part(
+            #    block_name, WanAttentionBlock,
+            #    dim=self.dim, ffn_dim=self.ffn_dim, num_heads=self.num_heads,
+            #    window_size=self.window_size, qk_norm=self.qk_norm,
+            #    cross_attn_norm=self.cross_attn_norm, eps=self.eps
+            #)
 
-            x = block(x, **kwargs)
-            x_null = block(x_null, **kwargs_null)
+            x = self.blocks[i](x, **kwargs)
+            x_null = self.blocks[i](x_null, **kwargs_null)
 
-        if self.is_low_mem:
-            self.blocks = None
+            #del blocks
             #delattr(self, block_name)
-            gc.collect()
-            torch.cuda.empty_cache()
+            # always keep memory clean to faster load new tensors
+            #gc.collect()
+            #torch.cuda.empty_cache()
 
         # --- Part 3: Head and Unpatchify ---
 
         if not self.head:
             print("Loading head to CUDA...")
-            self._load_and_move_part_v1(
+            self._load_and_move_part(
                 "head", Head,
                 dim=self.dim,
                 out_dim=self.out_dim,
@@ -748,10 +1067,9 @@ class WanModel(ModelMixin, ConfigMixin):
             e)
 
         del e
-        if self.is_low_mem:
-            self.head = None
-            gc.collect()
-            torch.cuda.empty_cache()
+        #del self.head
+        # gc.collect()
+        #torch.cuda.empty_cache()
 
         print("Performing unpatchify...")
         x = self.unpatchify(x, grid_sizes)
@@ -759,8 +1077,8 @@ class WanModel(ModelMixin, ConfigMixin):
 
         del grid_sizes
 
-        return [u
-                for u in x], [u
+        return [u.float()
+                for u in x], [u.float()
                 for u in x_null]
 
     def unpatchify(self, x, grid_sizes):
@@ -802,15 +1120,12 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init embeddings
         nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        if self.text_embedding:
-            for m in self.text_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
-        if self.time_embedding:
-            for m in self.time_embedding.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=.02)
+        for m in self.text_embedding.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=.02)
+        for m in self.time_embedding.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=.02)
 
         # init output layer
-        if self.head:
-            nn.init.zeros_(self.head.head.weight)
+        nn.init.zeros_(self.head.head.weight)

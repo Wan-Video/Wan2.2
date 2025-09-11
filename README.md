@@ -10,6 +10,20 @@
     📕 <a href="https://alidocs.dingtalk.com/i/nodes/jb9Y4gmKWrx9eo4dCql9LlbYJGXn6lpz">使用指南(中文)</a>&nbsp&nbsp | &nbsp&nbsp 📘 <a href="https://alidocs.dingtalk.com/i/nodes/EpGBa2Lm8aZxe5myC99MelA2WgN7R35y">User Guide(English)</a>&nbsp&nbsp | &nbsp&nbsp💬 <a href="https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg">WeChat(微信)</a>&nbsp&nbsp
 <br>
 
+
+<h1>How to run  Wan2.2 localy on 8GB VRAM (!!model code changed!!)</h1>
+<ol>
+<li> huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir ./Wan2.2-T2V-A14B</li>
+<li> convert high_noise_model and low_noise_model to bfloat16 to fit one block in 8GB VRAM with <strong>convert_safetensors.py</strong> </li>
+<li> run <strong>optimize_files.py</strong> - split safetensors files by modules (run after convert_safetensors.py)</li>
+<li> python <strong>generate_local.py</strong> --task t2v-A14B --size "1280*720" --ckpt_dir ./Wan2.2-T2V-A14B --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."</li>
+</ol>
+
+<p>* generated frames are limited to 21-25 to fit in 8GB VRAM</p>
+<p></p>* tested on <b>HELIOS PREDATOR 300</b> aptop (3070Ti 8GB) 83.40s/it for 25 frames,  66.30s/it for 17 frames (6GB)</p>
+
+Wan2.2 on 8GB VRAM: Run Advanced AI Video Generation Locally! (Optimization Guide) https://youtu.be/LlqnghCNxXM
+
 -----
 
 [**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
