@@ -123,7 +123,7 @@ def _parse_args():
         "--frame_num",
         type=int,
         default=None,
-        help="How many frames of video are generated. The number should be 4n+1"
+        help="How many frames of video are generated. The number should be 4n+1. On some large video-memory devices,like AMD CDNA3, this number can be tuned to fully utilze HBM resoure and generaete long video-clips."
     )
     parser.add_argument(
         "--ckpt_dir",
@@ -400,6 +400,14 @@ def generate(args):
         args.prompt = input_prompt[0]
         logging.info(f"Extended prompt: {args.prompt}")
 
+    if ("t2v" in args.task) or ("i2v" in args.task):
+        if ( args.frame_num == 81 ) and torch.cuda.is_available() and (torch.version.hip is not None) :
+            free, total = torch.cuda.mem_get_info()
+            free_GB = free / (1024*1024*1024)
+            total_GB = total / (1024*1024*1024)
+            logging.info(f"Your GPU has total {total_GB} GB video memory, {free_GB} GB is free.")
+            logging.info(f"On a single AMD CDNA3 GPU,Wan2.2-14B model can generate up to 321 frames/20 sec 720P video clips.")
+            logging.info(f"You are using the default value of frame_num option, do you need to tune it to fully utilized HBM resource?")
     if "t2v" in args.task:
         logging.info("Creating WanT2V pipeline.")
         wan_t2v = wan.WanT2V(
