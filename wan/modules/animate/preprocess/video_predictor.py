@@ -152,6 +152,7 @@ class SAM2VideoPredictor(_SAM2VideoPredictor):
         # metadata for each tracking frame (e.g. which direction it's tracked)
         inference_state["tracking_has_started"] = False
         inference_state["frames_already_tracked"] = {}
+        inference_state["frames_tracked_per_obj"] = {}
         # Warm up the visual backbone and cache the image feature on frame 0
         self._get_image_feature(inference_state, frame_idx=0, batch_size=1)
         return inference_state
