@@ -363,7 +363,6 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
     def after_transformer_block(self, block_idx, x, motion_vec, ori_seq_len, motion_masks=None):
         if block_idx % 5 == 0:
-            # adapter_args = [x, motion_vec, motion_masks, self.use_context_parallel]
             adapter_args = [x, motion_vec, ori_seq_len, motion_masks, self.use_context_parallel]
             residual_out = self.face_adapter.fuser_blocks[block_idx // 5](*adapter_args)
             x = residual_out + x
