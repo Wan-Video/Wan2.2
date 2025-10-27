@@ -361,7 +361,6 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return x, motion_vec
 
 
-    # def after_transformer_block(self, block_idx, x, motion_vec, motion_masks=None):
     def after_transformer_block(self, block_idx, x, motion_vec, ori_seq_len, motion_masks=None):
         if block_idx % 5 == 0:
             # adapter_args = [x, motion_vec, motion_masks, self.use_context_parallel]
