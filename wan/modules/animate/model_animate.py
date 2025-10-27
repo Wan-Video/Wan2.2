@@ -361,9 +361,9 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return x, motion_vec
 
 
-    def after_transformer_block(self, block_idx, x, motion_vec, motion_masks=None):
+    def after_transformer_block(self, block_idx, x, motion_vec, ori_seq_len, motion_masks=None):
         if block_idx % 5 == 0:
-            adapter_args = [x, motion_vec, motion_masks, self.use_context_parallel]
+            adapter_args = [x, motion_vec, ori_seq_len, motion_masks, self.use_context_parallel]
             residual_out = self.face_adapter.fuser_blocks[block_idx // 5](*adapter_args)
             x = residual_out + x
         return x
@@ -397,6 +397,8 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
+        sec0 = x[0]
+        ori_seq_len = sec0.size(1)
         x = torch.cat([
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                       dim=1) for u in x
@@ -437,7 +439,7 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
-            x = self.after_transformer_block(idx, x, motion_vec)
+            x = self.after_transformer_block(idx, x, motion_vec, ori_seq_len)
 
         # head
         x = self.head(x, e)
