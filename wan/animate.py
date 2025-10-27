@@ -9,7 +9,7 @@ from functools import partial
 from einops import rearrange
 import numpy as np
 import torch
-
+from loguru import logger
 import torch.distributed as dist
 from peft import set_peft_model_state_dict
 from decord import VideoReader
@@ -24,6 +24,7 @@ from .modules.animate import CLIPModel
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
 from .modules.animate.animate_utils import TensorList, get_loraconfig
+from .utils.utils import load_and_merge_lora_weight_from_safetensors
 from .utils.fm_solvers import (
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
@@ -39,6 +40,7 @@ class WanAnimate:
         self,
         config,
         checkpoint_dir,
+        lora_dir=None,
         device_id=0,
         rank=0,
         t5_fsdp=False,
@@ -85,6 +87,8 @@ class WanAnimate:
 
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
+        self.boundary = getattr(config, 'boundary', 0.9)
+        self._has_lightning_lora = lora_dir is not None
 
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
@@ -112,25 +116,101 @@ class WanAnimate:
 
         logging.info(f"Creating WanAnimate from {checkpoint_dir}")
 
-        if not dit_fsdp:
-            self.noise_model = WanAnimateModel.from_pretrained(
-                checkpoint_dir,
-                torch_dtype=self.param_dtype,
-                device_map=self.device)
-        else:
-            self.noise_model = WanAnimateModel.from_pretrained(
-                checkpoint_dir, torch_dtype=self.param_dtype)
+        # If a Lightning-style LoRA dir is provided, build two models and merge LoRA weights.
+        if self._has_lightning_lora:
+            assert use_relighting_lora is False, "Do not use --use_relighting_lora together with --lora_dir."
+            if not dit_fsdp:
+                self.low_noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir,
+                    torch_dtype=self.param_dtype,
+                    device_map=self.device)
+                self.high_noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir,
+                    torch_dtype=self.param_dtype,
+                    device_map=self.device)
+            else:
+                self.low_noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir, torch_dtype=self.param_dtype)
+                self.high_noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir, torch_dtype=self.param_dtype)
 
-        self.noise_model = self._configure_model(
-            model=self.noise_model,
-            use_sp=use_sp,
-            dit_fsdp=dit_fsdp,
-            shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype,
-            use_lora=use_relighting_lora,
-            checkpoint_dir=checkpoint_dir,
-            config=config
+            # merge LoRA weights
+            low_path = os.path.join(lora_dir, config.low_noise_lora_checkpoint)
+            high_path = os.path.join(lora_dir, config.high_noise_lora_checkpoint)
+
+            # Fallbacks: allow single-file LoRA or keyword-based matching
+            if not os.path.exists(low_path) or not os.path.exists(high_path):
+                try:
+                    lora_files = [f for f in os.listdir(lora_dir) if f.endswith('.safetensors')]
+                except Exception:
+                    lora_files = []
+
+                if len(lora_files) == 1:
+                    # single LoRA file provided; apply to both models
+                    only_file = os.path.join(lora_dir, lora_files[0])
+                    logging.warning(f"Only one LoRA file found in {lora_dir}: {lora_files[0]}. Applying it to both low/high noise models.")
+                    low_path = only_file
+                    high_path = only_file
+                else:
+                    # try to pick by keywords
+                    low_candidate = next((os.path.join(lora_dir, f) for f in lora_files if 'low' in f.lower()), None)
+                    high_candidate = next((os.path.join(lora_dir, f) for f in lora_files if 'high' in f.lower()), None)
+                    if low_candidate and not os.path.exists(low_path):
+                        low_path = low_candidate
+                    if high_candidate and not os.path.exists(high_path):
+                        high_path = high_candidate
+
+            if not os.path.exists(low_path):
+                raise FileNotFoundError(f"LoRA file for low-noise model not found: {low_path}")
+            if not os.path.exists(high_path):
+                raise FileNotFoundError(f"LoRA file for high-noise model not found: {high_path}")
+
+            logging.info(f"Merging low-noise LoRA from: {low_path}")
+            self.low_noise_model = load_and_merge_lora_weight_from_safetensors(self.low_noise_model, low_path)
+            logging.info(f"Merging high-noise LoRA from: {high_path}")
+            self.high_noise_model = load_and_merge_lora_weight_from_safetensors(self.high_noise_model, high_path)
+
+            # configure
+            self.low_noise_model = self._configure_model(
+                model=self.low_noise_model,
+                use_sp=use_sp,
+                dit_fsdp=dit_fsdp,
+                shard_fn=shard_fn,
+                convert_model_dtype=convert_model_dtype,
+                use_lora=False,
+                checkpoint_dir=checkpoint_dir,
+                config=config
             )
+            self.high_noise_model = self._configure_model(
+                model=self.high_noise_model,
+                use_sp=use_sp,
+                dit_fsdp=dit_fsdp,
+                shard_fn=shard_fn,
+                convert_model_dtype=convert_model_dtype,
+                use_lora=False,
+                checkpoint_dir=checkpoint_dir,
+                config=config
+            )
+        else:
+            if not dit_fsdp:
+                self.noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir,
+                    torch_dtype=self.param_dtype,
+                    device_map=self.device)
+            else:
+                self.noise_model = WanAnimateModel.from_pretrained(
+                    checkpoint_dir, torch_dtype=self.param_dtype)
+
+            self.noise_model = self._configure_model(
+                model=self.noise_model,
+                use_sp=use_sp,
+                dit_fsdp=dit_fsdp,
+                shard_fn=shard_fn,
+                convert_model_dtype=convert_model_dtype,
+                use_lora=use_relighting_lora,
+                checkpoint_dir=checkpoint_dir,
+                config=config
+                )
 
         if use_sp:
             self.sp_size = get_world_size()
@@ -197,6 +277,29 @@ class WanAnimate:
                 model.to(self.device)
 
         return model
+
+    def _prepare_model_for_timestep(self, t, boundary, offload_model):
+        """Select and prepare the correct model for the given timestep.
+
+        If lightning LoRA is present, switch between low/high models by boundary.
+        Also perform simple CPU/GPU offload if requested.
+        """
+        if not self._has_lightning_lora:
+            return self.noise_model
+
+        if t.item() >= boundary:
+            required = 'high_noise_model'
+            offload = 'low_noise_model'
+        else:
+            required = 'low_noise_model'
+            offload = 'high_noise_model'
+
+        if offload_model or self.init_on_cpu:
+            if next(getattr(self, offload).parameters()).device.type == 'cuda':
+                getattr(self, offload).to('cpu')
+            if next(getattr(self, required).parameters()).device.type == 'cpu':
+                getattr(self, required).to(self.device)
+        return getattr(self, required)
 
     def inputs_padding(self, array, target_len):
         idx = 0
@@ -482,8 +585,10 @@ class WanAnimate:
                 torch.autocast(device_type=str(self.device), dtype=torch.bfloat16, enabled=True),
                 torch.no_grad()
             ):
+                logger.info(f"using {sample_solver}, time_step:{self.num_train_timesteps}, shift:{shift}")
                 if sample_solver == 'unipc':
                     sample_scheduler = FlowUniPCMultistepScheduler(
+                        
                         num_train_timesteps=self.num_train_timesteps,
                         shift=1,
                         use_dynamic_shifting=False)
@@ -600,19 +705,22 @@ class WanAnimate:
                         "face_pixel_values": face_pixel_values_uncond,
                     }
 
+                boundary = int(self.boundary * self.num_train_timesteps)
                 for i, t in enumerate(tqdm(timesteps)):
                     latent_model_input = latents
                     timestep = [t]
 
                     timestep = torch.stack(timestep)
 
+                    # pick model (single or low/high by boundary)
+                    model = self._prepare_model_for_timestep(t, boundary, offload_model)
                     noise_pred_cond = TensorList(
-                         self.noise_model(TensorList(latent_model_input), t=timestep, **arg_c)
+                         model(TensorList(latent_model_input), t=timestep, **arg_c)
                     )
 
                     if guide_scale > 1:
                         noise_pred_uncond = TensorList(
-                             self.noise_model(
+                             model(
                                 TensorList(latent_model_input), t=timestep, **arg_null
                             )
                         )
