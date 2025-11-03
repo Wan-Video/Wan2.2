@@ -361,8 +361,10 @@ class WanT2V:
 
             x0 = latents
             if offload_model:
-                self.low_noise_model.cpu()
-                self.high_noise_model.cpu()
+                if next(self.low_noise_model.parameters()).is_cuda:
+                    self.low_noise_model.cpu()
+                if next(self.high_noise_model.parameters()).is_cuda:
+                    self.high_noise_model.cpu()
                 torch.cuda.empty_cache()
             if self.rank == 0:
                 videos = self.vae.decode(x0)
