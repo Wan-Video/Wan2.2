@@ -297,6 +297,69 @@ Wan-Animate takes a video and a character image as input, and generates a video 
 
 Please visit our [project page](https://humanaigc.github.io/wan-animate) to see more examples and learn about the scenarios suitable for this model.
 
+💡 Note for Ubuntu 22.04 / Python 3.12+ users: If you encounter a KeyError: 'frames_tracked_per_obj' or an ImportError: undefined symbol during preprocessing, it may be due to an incompatibility with the pre-compiled sam-2 package. You may need to compile it from source using the following steps:
+
+<details> <summary>Click to view detailed build instructions for sam-2</summary>
+
+1. Set Up the Build Environment
+
+```
+# Install required build tools
+sudo apt update
+sudo apt install -y gcc-12 g++-12 ninja-build
+pip install -U pip wheel setuptools numpy
+```
+
+2. Configure Environment Variables
+
+```
+# Set compiler and CUDA paths (adjust for your system)
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+export CUDA_HOME=/usr/local/cuda-12.1
+export PATH=$CUDA_HOME/bin:$PATH
+
+# Add CUDA and PyTorch libraries to LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(
+python - <<'PY'
+import site,os
+sp=site.getsitepackages()[0]
+print(":".join(
+  p for p in [
+    os.path.join(sp,'nvidia','cublas','lib'),
+    os.path.join(sp,'nvidia','cudnn','lib'),
+    os.path.join(sp,'nvidia','cuda_runtime','lib'),
+    os.path.join(sp,'torch','lib'),
+  ] if os.path.isdir(p)
+))
+PY
+)
+
+# Specify the target CUDA architecture for your GPU (RTX 4090 is 8.9)
+export TORCH_CUDA_ARCH_LIST="8.9"
+```
+
+3. Install sam-2 from Source
+
+```
+PIP_NO_BUILD_ISOLATION=1 pip install -e \
+  "git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266#egg=SAM-2" \
+  --no-cache-dir
+```
+
+4. Build the C++ Extension In-Place
+
+```
+# Navigate to the source directory in your virtual environment
+# Replace 'YOUR_VIR_ENV' with the path to your environment (e.g., venv, conda envs)
+cd YOUR_VIR_ENV/src/sam-2/
+
+# Build the extension
+python setup.py build_ext --inplace
+```
+</details>
+
 ##### (1) Preprocessing 
 The input video should be preprocessed into several materials before be feed into the inference process.  Please refer to the following processing flow, and more details about preprocessing can be found in [UserGuider](https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/animate/preprocess/UserGuider.md).
 
@@ -501,4 +564,71 @@ We would like to thank the contributors to the [SD3](https://huggingface.co/stab
 
 ## Contact Us
 If you would like to leave a message to our research or product teams, feel free to join our [Discord](https://discord.gg/AKNgpMK4Yj) or [WeChat groups](https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg)!
+
+
+
+> 💡 **Note for Ubuntu 22.04 / Python 3.12+ users:** If you encounter a `KeyError: frames_tracked_per_obj` or an `ImportError: undefined symbol` during preprocessing, it may be due to an incompatibility with the pre-compiled `sam-2` package. You may need to compile it from source using the following steps:
+> 
+> <details>
+> <summary>Click to view detailed build instructions for sam-2</summary>
+> 
+> **1. Set Up the Build Environment**
+> 
+> ```
+> # Install required build tools
+> sudo apt update
+> sudo apt install -y gcc-12 g++-12 ninja-build
+> pip install -U pip wheel setuptools numpy
+> ```
+> 
+> **2. Configure Environment Variables**
+> 
+> ```
+> # Set compiler and CUDA paths (adjust for your system)
+> export CC=/usr/bin/gcc-12
+> export CXX=/usr/bin/g++-12
+> export CUDA_HOME=/usr/local/cuda-12.1
+> export PATH=$CUDA_HOME/bin:$PATH
+> 
+> # Add CUDA and PyTorch libraries to LD_LIBRARY_PATH
+> export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64
+> export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(
+> python - <<'PY'
+> import site,os
+> sp=site.getsitepackages()
+> print(":".join(
+>   p for p in [
+>     os.path.join(sp,'nvidia','cublas','lib'),
+>     os.path.join(sp,'nvidia','cudnn','lib'),
+>     os.path.join(sp,'nvidia','cuda_runtime','lib'),
+>     os.path.join(sp,'torch','lib'),
+>   ] if os.path.isdir(p)
+> ))
+> PY
+> )
+> 
+> # Specify the target CUDA architecture for your GPU (RTX 4090 is 8.9)
+> export TORCH_CUDA_ARCH_LIST="8.9"
+> ```
+> 
+> **3. Install `sam-2` from Source**
+> 
+> ```
+> PIP_NO_BUILD_ISOLATION=1 pip install -e \
+>   "git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266#egg=SAM-2" \
+>   --no-cache-dir
+> ```
+> 
+> **4. Build the C++ Extension In-Place**
+> 
+> ```
+> # Navigate to the source directory in your virtual environment
+> # Replace 'YOUR_VIR_ENV' with the path to your environment (e.g., venv, conda envs)
+> cd YOUR_VIR_ENV/src/sam-2/
+> 
+> # Build the extension
+> python setup.py build_ext --inplace
+> ```
+> 
+> </details>
 
