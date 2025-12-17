@@ -404,6 +404,9 @@ class WanModel(ModelMixin, ConfigMixin):
         ],
                                dim=1)
 
+        self.e_zero = None
+        self.e0_zero = None
+
         # initialize weights
         self.init_weights()
 
@@ -414,6 +417,7 @@ class WanModel(ModelMixin, ConfigMixin):
         context,
         seq_len,
         y=None,
+        mask=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -429,6 +433,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 Maximum sequence length for positional encoding
             y (List[Tensor], *optional*):
                 Conditional video inputs for image-to-video mode, same shape as x
+            mask (Tensor):
+                Time embeddings mask tensor
 
         Returns:
             List[Tensor]:
@@ -457,17 +463,33 @@ class WanModel(ModelMixin, ConfigMixin):
         ])
 
         # time embeddings
-        if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
+        assert t.dim() == 1
+        assert t.size(0) == 1
         with torch.amp.autocast('cuda', dtype=torch.float32):
             bt = t.size(0)
-            t = t.flatten()
             e = self.time_embedding(
                 sinusoidal_embedding_1d(self.freq_dim,
-                                        t).unflatten(0, (bt, seq_len)).float())
+                                        t).unflatten(0, (bt, 1)).float())
             e0 = self.time_projection(e).unflatten(2, (6, self.dim))
             assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
+        e = e.repeat(1, seq_len, 1)
+        e0 = e0.repeat(1, seq_len, 1, 1)
+
+        if mask is not None:
+            if self.e_zero is None or self.e0_zero is None:
+                t_zero = torch.tensor([0], device=device)
+                with torch.amp.autocast('cuda', dtype=torch.float32):
+                    self.e_zero = self.time_embedding(
+                        sinusoidal_embedding_1d(self.freq_dim,
+                                                t_zero).unflatten(0, (1, 1)).float())
+                    self.e0_zero = self.time_projection(self.e_zero).unflatten(2, (6, self.dim))
+                    assert self.e_zero.dtype == torch.float32 and self.e0_zero.dtype == torch.float32
+
+            zero_mask = (mask == 0)
+            if zero_mask.any():
+                e[:, zero_mask, :] = self.e_zero
+                e0[:, zero_mask, :] = self.e0_zero
         # context
         context_lens = None
         context = self.text_embedding(

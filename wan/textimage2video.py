@@ -355,7 +355,6 @@ class WanTI2V:
 
             # sample videos
             latents = noise
-            mask1, mask2 = masks_like(noise, zero=False)
 
             arg_c = {'context': context, 'seq_len': seq_len}
             arg_null = {'context': context_null, 'seq_len': seq_len}
@@ -369,13 +368,6 @@ class WanTI2V:
                 timestep = [t]
 
                 timestep = torch.stack(timestep)
-
-                temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
-                temp_ts = torch.cat([
-                    temp_ts,
-                    temp_ts.new_ones(seq_len - temp_ts.size(0)) * timestep
-                ])
-                timestep = temp_ts.unsqueeze(0)
 
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
@@ -570,19 +562,18 @@ class WanTI2V:
 
                 timestep = torch.stack(timestep).to(self.device)
 
-                temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
-                temp_ts = torch.cat([
-                    temp_ts,
-                    temp_ts.new_ones(seq_len - temp_ts.size(0)) * timestep
+                mask = (mask2[0][0][:, ::2, ::2]).flatten()
+                mask = torch.cat([
+                    mask,
+                    mask.new_ones(seq_len - mask.size(0))
                 ])
-                timestep = temp_ts.unsqueeze(0)
 
                 noise_pred_cond = self.model(
-                    latent_model_input, t=timestep, **arg_c)[0]
+                    latent_model_input, t=timestep, mask=mask, **arg_c)[0]
                 if offload_model:
                     torch.cuda.empty_cache()
                 noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, **arg_null)[0]
+                    latent_model_input, t=timestep, mask=mask,**arg_null)[0]
                 if offload_model:
                     torch.cuda.empty_cache()
                 noise_pred = noise_pred_uncond + guide_scale * (
