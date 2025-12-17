@@ -669,7 +669,7 @@ class Decoder3d(nn.Module):
             CausalConv3d(out_dim, 12, 3, padding=1),
         )
 
-    def forward(self, x, feat_cache=None, feat_idx=[0], first_chunk=False):
+    def forward(self, x, feat_cache=None, feat_idx=[0], first_chunk=False, offload_cache: bool = False):
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -683,21 +683,31 @@ class Decoder3d(nn.Module):
                     dim=2,
                 )
             x = self.conv1(x, feat_cache[idx])
-            feat_cache[idx] = cache_x
+            feat_cache[idx] = cache_x.cpu() if offload_cache else cache_x
             feat_idx[0] += 1
         else:
             x = self.conv1(x)
 
         for layer in self.middle:
             if isinstance(layer, ResidualBlock) and feat_cache is not None:
+                idx = feat_idx[0]
                 x = layer(x, feat_cache, feat_idx)
+                if offload_cache:
+                    for _idx in range(idx, feat_idx[0]):
+                        if isinstance(feat_cache[_idx], torch.Tensor):
+                            feat_cache[_idx] = feat_cache[_idx].cpu()
             else:
                 x = layer(x)
 
         ## upsamples
         for layer in self.upsamples:
             if feat_cache is not None:
+                idx = feat_idx[0]
                 x = layer(x, feat_cache, feat_idx, first_chunk)
+                if offload_cache:
+                    for _idx in range(idx, feat_idx[0]):
+                        if isinstance(feat_cache[_idx], torch.Tensor):
+                            feat_cache[_idx] = feat_cache[_idx].cpu()
             else:
                 x = layer(x)
 
@@ -716,7 +726,7 @@ class Decoder3d(nn.Module):
                         dim=2,
                     )
                 x = layer(x, feat_cache[idx])
-                feat_cache[idx] = cache_x
+                feat_cache[idx] = cache_x.cpu() if offload_cache else cache_x
                 feat_idx[0] += 1
             else:
                 x = layer(x)
@@ -809,7 +819,7 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
-    def decode(self, z, scale):
+    def decode(self, z, scale, offload_cache: bool = False):
         self.clear_cache()
         if isinstance(scale[0], torch.Tensor):
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
@@ -826,14 +836,17 @@ class WanVAE_(nn.Module):
                     feat_cache=self._feat_map,
                     feat_idx=self._conv_idx,
                     first_chunk=True,
+                    offload_cache=offload_cache,
                 )
             else:
                 out_ = self.decoder(
                     x[:, :, i:i + 1, :, :],
                     feat_cache=self._feat_map,
                     feat_idx=self._conv_idx,
+                    offload_cache=offload_cache,
                 )
                 out = torch.cat([out, out_], 2)
+
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
         return out
@@ -1035,15 +1048,14 @@ class Wan2_2_VAE:
             logging.info(e)
             return None
 
-    def decode(self, zs):
+    def decode(self, zs, offload_cache: bool = False):
         try:
             if not isinstance(zs, list):
                 raise TypeError("zs should be a list")
             with amp.autocast(dtype=self.dtype):
                 return [
-                    self.model.decode(u.unsqueeze(0),
-                                      self.scale).float().clamp_(-1,
-                                                                 1).squeeze(0)
+                    self.model.decode(u.unsqueeze(0), self.scale,
+                                      offload_cache=offload_cache).float().clamp_(-1, 1).squeeze(0)
                     for u in zs
                 ]
         except TypeError as e:
