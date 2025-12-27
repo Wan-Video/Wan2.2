@@ -5,3 +5,11 @@ tmp_examples*
 new_checkpoint*
 batch_test*
 nohup*
+wan.egg-info
+build
+Wan2.2-T2V-A14B
+2.4.0
+1.23.5
+Wan2.2-TI2V-5B
+input
+out
