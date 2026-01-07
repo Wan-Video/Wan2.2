@@ -1,0 +1,25 @@
+{
+  "global_prompt": "High contrast lighting, cinematic atmosphere, 35mm film grain, shallow depth of field, realistic handheld camera motion, movie still, 8k resolution.",
+  
+  "scene_prompts": [
+    "  A handheld, front-facing, selfie perspective of a man filming himself at arm’s length, as if he is vlogging. The framing feels intimate and direct, with the camera clearly handheld."
+  ],
+  
+  "mapping": {
+    "1": [1, 2, 3]
+  },
+  
+  "local_prompts": [
+    " The man looks directly into the lens, centered in frame. standing on a busy street in Hong Kong. Neon signs glow behind him, skyscrapers loom overhead, and crowds move in the background. The lighting is vibrant and urban, while the man remains centered and continues looking directly into the camera.",
+    
+    " The man raises his hand toward the camera. His palm moves closer until his hand completely fills the frame and covers the camera, smoothly blocking the lens and cutting off the scene.",
+    
+    " The hand pulls away from the lens, revealing the man in the same framing but now is filming himself in the grand canyons. The lighting is dramatic, with strong contrasts."
+  ],
+  
+  "dependency": {
+    "1": [2, 3],
+    "2": [1, 3],
+    "3": [1, 2]
+  }
+}

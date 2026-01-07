@@ -3,12 +3,74 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
 
 __all__ = ['WanModel']
+
+def build_temporal_cost(q_token_idx, Lq, Lk, device, dtype):
+    #Assume that each segment is equal in length
+
+    # q_token_idx.sort(key = lambda x: x ['midpoint'])
+
+    offset = torch.zeros(Lq, Lk, device=device, dtype=dtype)
+
+    #The frame number for each query token
+    tokens_per_frame = int(q_token_idx[0]['tokens_per_frame'])
+
+    query_frames = (
+        torch.arange(Lq, device=device, dtype=torch.long)
+        // tokens_per_frame
+    )
+
+    for seg in q_token_idx:
+        w = seg['window']
+        sigma = torch.tensor(seg['sigma'], dtype=torch.float32, device=device)
+        local = seg['local_token_idx'].to(device=device)
+        midpoint = torch.tensor(seg['midpoint'], dtype=torch.float32, device=device)
+
+        d = (query_frames.float()[:, None] - midpoint).abs()
+        # cost = (torch.relu(d - w) ** 2) / (2 * sigma ** 2)
+        cost = (F.softplus(d - w) ** 2) / (2 * sigma ** 2)
+
+        offset[:, local] = cost.to(offset.dtype)
+
+    del query_frames, sigma
+    return offset
+
+
+def chunked_softmax_attention(q, k, v, q_token_idx, chunk_size=16):
+
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+
+    v = v.transpose(1,2)
+
+    B, H, Lq, D = q.shape
+    _, _, Lk, _ = k.shape
+    scale = 1.0 / math.sqrt(D)
+
+    temporal_cost_map = build_temporal_cost(q_token_idx, Lq, Lk, q.device, q.dtype)
+
+    out = torch.zeros(B, H, Lq, D, device=q.device, dtype=q.dtype)
+
+    for start in range(0, Lq, chunk_size):
+        end = min(start + chunk_size, Lq)
+        logits = torch.matmul(q[:, :, start:end, :], k.transpose(-2, -1)) * scale 
+
+        mask_chunk = temporal_cost_map[start:end].unsqueeze(0).unsqueeze(0)
+        logits = logits - mask_chunk.float() 
+        attn = torch.softmax(logits, dim=-1)
+        out[:, :, start:end] = torch.matmul(attn, v)
+        
+        del logits, attn
+       
+
+    return out.transpose(1,2)
+
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -123,7 +185,7 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, self_attention_map=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -142,12 +204,47 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
+        q = rope_apply(q, grid_sizes, freqs)
+        k = rope_apply(k, grid_sizes, freqs)
+
+        if self_attention_map is None:
+            x = flash_attention(
+                q=q,
+                k=k,
+                v=v,
+                k_lens=seq_lens,
+                window_size=self.window_size)
+        else:
+            outs = []
+            for seg in self_attention_map:
+                q_idx = seg['q_idx'].to(device=q.device, dtype=torch.long)
+                k_idx = seg['k_idx'].to(device=q.device, dtype=torch.long)
+
+                q_slice = q[:, q_idx]
+                k_slice = k[:, k_idx]
+                v_slice = v[:, k_idx]
+
+                q_lens = torch.full(
+                    (q.shape[0],), q_slice.size(1),
+                    device=q.device, dtype=torch.int32,
+                )
+                k_lens = torch.full(
+                    (q.shape[0],), k_slice.size(1),
+                    device=q.device, dtype=torch.int32,
+                )
+                outs.append(
+                    flash_attention(
+                        q=q_slice,
+                        k=k_slice,
+                        v=v_slice,
+                        q_lens=q_lens,
+                        k_lens=k_lens,
+                        window_size=self.window_size,
+                    )
+                )
+                
+            x = torch.cat(outs, dim=1)
+
 
         # output
         x = x.flatten(2)
@@ -157,12 +254,16 @@ class WanSelfAttention(nn.Module):
 
 class WanCrossAttention(WanSelfAttention):
 
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context, context_lens, q_token_idx=None):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
             context_lens(Tensor): Shape [B]
+            q_token_idx (list[tuple[int, int, Tensor | list[int]]] | None):
+                Optional routing that restricts which context tokens each query range can attend to.
+                Each entry is (q_start, q_end, token_idx) where [q_start:q_end) is a slice in the
+                query sequence and token_idx are indices in the context sequence.
         """
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
@@ -172,7 +273,10 @@ class WanCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        if not q_token_idx:
+            x = flash_attention(q, k, v, k_lens=context_lens)
+        else:
+            x = chunked_softmax_attention(q,k,v, q_token_idx = q_token_idx)
 
         # output
         x = x.flatten(2)
@@ -225,6 +329,8 @@ class WanAttentionBlock(nn.Module):
         freqs,
         context,
         context_lens,
+        cross_attn_q_token_idx=None,
+        self_attention_map=None,
     ):
         r"""
         Args:
@@ -242,13 +348,16 @@ class WanAttentionBlock(nn.Module):
         # self-attention
         y = self.self_attn(
             self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
-            seq_lens, grid_sizes, freqs)
+            seq_lens, grid_sizes, freqs, self_attention_map=self_attention_map)
         with torch.amp.autocast('cuda', dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            x = x + self.cross_attn(self.norm3(x),
+                                    context,
+                                    context_lens,
+                                    q_token_idx=cross_attn_q_token_idx)
             y = self.ffn(
                 self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
             with torch.amp.autocast('cuda', dtype=torch.float32):
@@ -414,6 +523,8 @@ class WanModel(ModelMixin, ConfigMixin):
         context,
         seq_len,
         y=None,
+        cross_attn_q_token_idx=None,
+        self_attention_map=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -484,7 +595,10 @@ class WanModel(ModelMixin, ConfigMixin):
             grid_sizes=grid_sizes,
             freqs=self.freqs,
             context=context,
-            context_lens=context_lens)
+            context_lens=context_lens,
+            cross_attn_q_token_idx=cross_attn_q_token_idx,
+            self_attention_map=self_attention_map,
+        )
 
         for block in self.blocks:
             x = block(x, **kwargs)

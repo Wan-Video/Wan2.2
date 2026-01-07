@@ -1,4 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+# We distinguish between scene-level semantic anchors, injected via cross-attention, and local action prompts that control motion within a scene. Self-attention is selectively routed to preserve temporal continuity only across segments with compatible scene semantics, while transitions that change the ontological status of the scene explicitly limit long-range self-attention to prevent semantic leakage.
+#A scene prompt must cover a contiguous span of local prompts where the world ontology is unchanged.
+#If a prompt exists across more than one segment, it is treated as a scene prompt.
 import gc
 import logging
 import math
@@ -6,6 +9,7 @@ import os
 import random
 import sys
 import types
+import json
 from contextlib import contextmanager
 from functools import partial
 
@@ -200,6 +204,161 @@ class WanT2V:
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
 
+
+    def _prepare_prompts(self, global_prompt, local_prompts, dependency, scene_prompts, mapping, frame_num, size):
+        
+        tokenizer = self.text_encoder.tokenizer
+
+        latent_frames = (frame_num - 1) // self.vae_stride[0] + 1
+        width, height = size
+        h_lat = int(height) // self.vae_stride[1]
+        w_lat = int(width) // self.vae_stride[2]
+        h_patches = h_lat // self.patch_size[1]
+        w_patches = w_lat // self.patch_size[2]
+        tokens_per_frame = int(h_patches) * int(w_patches)
+
+        concat_prompt = ""
+        for i, scene_prompt in enumerate(scene_prompts):
+            concat_prompt += scene_prompt
+            mapped_indices = sorted(mapping[str(i+1)])
+            for idx in mapped_indices:
+                concat_prompt += local_prompts[idx-1]
+            
+
+        full_prompt = global_prompt + concat_prompt
+        print(f'full prompt: {full_prompt}')
+        full_ids = tokenizer(full_prompt, add_special_tokens=True, padding=False, return_mask=False)[0].tolist()
+        print(f'full ids: {full_ids}')
+        def sentence_to_token_indices(subsentences):
+            #returns token indices per local prompt
+            def find_subsequence(haystack, needle):
+                #Return the start and end index
+                for start in range(len(haystack) - len(needle) + 1):
+                    if haystack[start: start + len(needle)] == needle: 
+                        return (start, start + len(needle))
+                
+            token_indices = {}
+            for subsentence in subsentences:
+                sub_ids = tokenizer(subsentence, padding=False, add_special_tokens=False)[0].tolist()
+                print(f'sub_ids: {sub_ids}')
+                match = find_subsequence(full_ids, sub_ids)
+                if match is None:
+                    raise ValueError(f"Subsentence not found in full prompt: {subsentence}")
+                
+                token_indices[subsentence] = match
+            return token_indices
+        
+        def frame_interval_to_q_indices(frame_start, frame_end, Hp, Wp):
+            # Returns the q indices for the given frame interval
+            q_idx = [] 
+            for f in range(frame_start, frame_end):
+                base = f * Hp * Wp 
+                for i in range(Hp * Wp):
+                    q_idx.append(base + i)
+            return q_idx
+
+        def build_q_token_idx(low_frame_intervals, high_frame_intervals, low_token_spans, high_token_spans, dependency, tokens_per_frame):        
+            q_token_idx = []
+            self_attention_map = []
+            epsilon = 1e-3
+
+            if len(low_frame_intervals)!=0:
+
+                for frame_start, frame_end, subsentences in low_frame_intervals: 
+
+                    # q_indices = frame_interval_to_q_indices(frame_start, frame_end, h_patches, w_patches)
+
+                    low_spans = []
+                    for subsentence in subsentences:
+                        start, end = low_token_spans[subsentence]
+                        low_spans.extend(range(start, end))
+
+                    sigma =  (0.5 * (frame_start + frame_end))/math.sqrt(2*math.log(1/epsilon))
+                   
+                    q_token_idx.append({
+                        "window": (frame_end - frame_start)//3,
+                        "sigma": torch.tensor(sigma, dtype=torch.float16),
+                        "midpoint": (frame_start + frame_end) // 2,
+                        "tokens_per_frame": tokens_per_frame,
+                        "local_token_idx": torch.tensor(low_spans, dtype=torch.long),
+                    })
+
+                # "q_idx": torch.tensor(q_indices, dtype=torch.long)
+
+            
+            if len(high_frame_intervals)!=0:
+                for frame_start, frame_end, subsentences in high_frame_intervals: 
+                    # q_indices = frame_interval_to_q_indices(frame_start, frame_end, h_patches, w_patches)
+
+                    high_spans = []
+                    for subsentence in subsentences:
+                        start, end = high_token_spans[subsentence]
+                        high_spans.extend(range(start, end))
+
+                    sigma =  (0.5 * (frame_start + frame_end))/math.sqrt(2*math.log(1/epsilon))
+
+                    q_token_idx.append({
+                        "window": (frame_end - frame_start)//3,
+                        "sigma": torch.tensor(sigma, dtype=torch.float16),
+                        "midpoint": (frame_start + frame_end) // 2,
+                        "tokens_per_frame": tokens_per_frame,
+                        "local_token_idx": torch.tensor(high_spans, dtype=torch.long),
+                    })
+                # "q_idx": torch.tensor(q_indices, dtype=torch.long)
+
+            # Build a simple windowed self-attention map: each segment attends to itself and neighboring segments.
+            for key, values in dependency.items():
+                key = int(key)
+                neighbors = [q_token_idx[key-1]['q_idx']]
+                for v in values:
+                    neighbors.append(q_token_idx[v-1]['q_idx'])
+                k_idx = torch.cat(neighbors, dim=0)
+                k_idx = torch.unique(k_idx, sorted=True)
+                # Ensure deterministic order and no overlaps when concatenating outputs
+                q_idx = q_token_idx[key-1]['q_idx']
+                self_attention_map.append({
+                    "q_start": int(q_idx[0].item()) if len(q_idx) > 0 else 0,
+                    "q_idx": q_idx,
+                    "k_idx": k_idx,
+                })
+
+            # Sort the map by query start to guarantee correct output order
+            self_attention_map = sorted(self_attention_map, key=lambda m: m["q_start"])
+
+                
+            # print(f'len(q_token_idx): {len(q_token_idx)}')
+            return q_token_idx, self_attention_map
+
+
+        low_spans = sentence_to_token_indices(local_prompts)
+        high_spans = sentence_to_token_indices(scene_prompts)
+        
+        if len(local_prompts) != 0:
+            step = math.ceil(latent_frames / len(local_prompts)) 
+            low_frame_intervals = [(step*i, 
+                                min(step*(i+1), latent_frames), 
+                                [local_prompts[i]]) for i in range(len(local_prompts))]
+
+            high_frame_intervals = []
+            for i, scene_prompt in enumerate(scene_prompts):
+                mapped_indices = sorted(mapping[str(i+1)])
+                frame_start = low_frame_intervals[mapped_indices[0]-1][0]
+                frame_end = low_frame_intervals[mapped_indices[-1]-1][1]
+                high_frame_intervals.append((frame_start, frame_end, [scene_prompt]))
+
+            q_token_idx, self_attention_map = build_q_token_idx(low_frame_intervals = low_frame_intervals,
+                                                                high_frame_intervals = high_frame_intervals,
+                                                                low_token_spans = low_spans,
+                                                                high_token_spans = high_spans,
+                                                                dependency = dependency,
+                                                                tokens_per_frame = tokens_per_frame,
+                                                                )
+        else:
+            q_token_idx = None
+            self_attention_map = None
+        return q_token_idx, self_attention_map, full_prompt
+
+       
     def generate(self,
                  input_prompt,
                  size=(1280, 720),
@@ -210,7 +369,8 @@ class WanT2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 prompt_filepath=None):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -237,6 +397,9 @@ class WanT2V:
                 Random seed for noise generation. If -1, use random seed.
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            cross_attn_q_token_idx (`list`, *optional*, defaults to None):
+                Optional cross-attention routing config. Each entry is `(q_start, q_end, token_idx_list)` and
+                restricts which text tokens (keys/values) the query slice `[q_start:q_end)` can attend to.
 
         Returns:
             torch.Tensor:
@@ -246,6 +409,25 @@ class WanT2V:
                 - H: Frame height (from size)
                 - W: Frame width from size)
         """
+
+        if prompt_filepath is not None:
+            with open(prompt_filepath, 'r') as f:
+                prompts = json.load(f)
+        
+                global_prompt = prompts.get("global_prompt", "")
+                local_prompts = prompts.get("local_prompts", [])
+                dependency = prompts.get("dependency", {})
+                scene_prompts = prompts.get("scene_prompts", [])
+                mapping = prompts.get("mapping", {})
+                local_prompts = [" " + lp for lp in local_prompts]
+
+
+
+                cross_attn_q_token_idx, self_attention_map, input_prompt = self._prepare_prompts(global_prompt, local_prompts, dependency, scene_prompts, mapping, frame_num, size)
+        else:
+            self_attention_map = None
+
+
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
@@ -329,8 +511,13 @@ class WanT2V:
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len}
-            arg_null = {'context': context_null, 'seq_len': seq_len}
+            arg_c = {
+                'context': context,
+                'seq_len': seq_len,
+                'cross_attn_q_token_idx': None if prompt_filepath is None else cross_attn_q_token_idx,
+                'self_attention_map': self_attention_map,
+            }
+            arg_null = {'context': context_null, 'seq_len': seq_len, 'self_attention_map': self_attention_map}
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents

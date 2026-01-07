@@ -106,6 +106,13 @@ def _parse_args():
     parser = argparse.ArgumentParser(
         description="Generate a image or video from a text prompt or image using Wan"
     )
+
+    parser.add_argument(
+        "--prompt_filepath",
+        type=str,
+        default=None,
+        help="The file of the input prompts containing the timesteps for each prompt."
+    )
     parser.add_argument(
         "--task",
         type=str,
@@ -424,7 +431,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            prompt_filepath = args.prompt_filepath)
     elif "ti2v" in args.task:
         logging.info("Creating WanTI2V pipeline.")
         wan_ti2v = wan.WanTI2V(
