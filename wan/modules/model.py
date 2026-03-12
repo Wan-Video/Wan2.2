@@ -33,10 +33,11 @@ def build_temporal_cost(q_token_idx, Lq, Lk, device, dtype):
         midpoint = torch.tensor(seg['midpoint'], dtype=torch.float32, device=device)
 
         d = (query_frames.float()[:, None] - midpoint).abs()
-        # cost = (torch.relu(d - w) ** 2) / (2 * sigma ** 2)
-        cost = (F.softplus(d - w) ** 2) / (2 * sigma ** 2)
+        cost = (torch.relu(d - w) ** 2) / (2 * sigma ** 2)
+        # cost = (F.softplus(d - w) ** 2) / (2 * sigma ** 2)
 
         offset[:, local] = cost.to(offset.dtype)
+        
 
     del query_frames, sigma
     return offset
@@ -109,8 +110,12 @@ def rope_apply(x, grid_sizes, freqs):
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
 
+        x_visual = x[i, :seq_len].clone()
+        x_extra = x[i, seq_len:].clone()
+
+        
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+        x_i = torch.view_as_complex(x_visual.to(torch.float64).reshape(
             seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
@@ -120,8 +125,58 @@ def rope_apply(x, grid_sizes, freqs):
                             dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
+        x_visual = torch.view_as_real(x_i * freqs_i).flatten(2)
+
+
+        #     for seg_id, (frame_start, frame_end) in enumerate(self_attention_map):
+                
+        #         # A. Calculate where this segment lives in the flat sequence
+        #         token_start = frame_start * h * w
+        #         token_end = frame_end * h * w
+                
+        #         # Bounds check (in case prompt is longer than video)
+        #         if token_start >= seq_len: break
+        #         token_end = min(token_end, seq_len)
+                
+        #         seg_frames = frame_end - frame_start
+        #         seg_tokens = seg_frames * h * w
+        #         if seg_frames <= 0: continue
+
+        #         # B. Isolate this segment's tokens
+        #         x_seg = x_visual[token_start:token_end]
+                
+        #         # C. Prepare Complex View
+        #         x_seg_complex = torch.view_as_complex(
+        #             x_seg.to(torch.float64).reshape(x_seg.shape[0], n, -1, 2)
+        #         )
+
+        #         # D. Build Shifted Frequencies
+        #         # Key Trick: We pretend this segment starts at t_offset (e.g., 256, 512...)
+        #         # effectively "teleporting" it away from previous segments in time.
+        #         t_virtual_start = frame_start + (seg_id * 512)
+
+        #         max_freq_len = freqs[0].shape[0]
+        #         if t_virtual_start + seg_frames > max_freq_len:
+        #             print(f"Warning: Time Gap pushes segment out of bounds ({t_virtual_start}). Clamping.")
+        #             # Clamp to end of table (not ideal, but prevents crash)
+        #             t_virtual_start = max(0, max_freq_len - seg_frames)
+                
+        #         # Time Freqs (Shifted)
+        #         ft = freqs[0][t_virtual_start : t_virtual_start + seg_frames]
+        #         ft = ft.view(seg_frames, 1, 1, -1).expand(seg_frames, h, w, -1)
+                
+        #         # Spatial Freqs (Standard)
+        #         fh = freqs[1][:h].view(1, h, 1, -1).expand(seg_frames, h, w, -1)
+        #         fw = freqs[2][:w].view(1, 1, w, -1).expand(seg_frames, h, w, -1)
+
+        #         # Combine
+        #         freqs_seg = torch.cat([ft, fh, fw], dim=-1).reshape(seg_tokens, 1, -1)
+
+        #         # E. Rotate and Write Back
+        #         x_seg_rotated = torch.view_as_real(x_seg_complex * freqs_seg).flatten(2)
+        #         x_visual[token_start:token_end] = x_seg_rotated.type_as(x)
+            
+        x_i = torch.cat([x_visual, x_extra])
 
         # append to collection
         output.append(x_i)
@@ -207,43 +262,43 @@ class WanSelfAttention(nn.Module):
         q = rope_apply(q, grid_sizes, freqs)
         k = rope_apply(k, grid_sizes, freqs)
 
-        if self_attention_map is None:
-            x = flash_attention(
-                q=q,
-                k=k,
-                v=v,
-                k_lens=seq_lens,
-                window_size=self.window_size)
-        else:
-            outs = []
-            for seg in self_attention_map:
-                q_idx = seg['q_idx'].to(device=q.device, dtype=torch.long)
-                k_idx = seg['k_idx'].to(device=q.device, dtype=torch.long)
+        # if self_attention_map is None:
+        x = flash_attention(
+            q=q,
+            k=k,
+            v=v,
+            k_lens=seq_lens,
+            window_size=self.window_size)
+        
+        # outs = []
+        # for seg in self_attention_map:
+        #     q_idx = seg['q_idx'].to(device=q.device, dtype=torch.long)
+        #     k_idx = seg['k_idx'].to(device=q.device, dtype=torch.long)
 
-                q_slice = q[:, q_idx]
-                k_slice = k[:, k_idx]
-                v_slice = v[:, k_idx]
+        #     q_slice = q[:, q_idx]
+        #     k_slice = k[:, k_idx]
+        #     v_slice = v[:, k_idx]
 
-                q_lens = torch.full(
-                    (q.shape[0],), q_slice.size(1),
-                    device=q.device, dtype=torch.int32,
-                )
-                k_lens = torch.full(
-                    (q.shape[0],), k_slice.size(1),
-                    device=q.device, dtype=torch.int32,
-                )
-                outs.append(
-                    flash_attention(
-                        q=q_slice,
-                        k=k_slice,
-                        v=v_slice,
-                        q_lens=q_lens,
-                        k_lens=k_lens,
-                        window_size=self.window_size,
-                    )
-                )
-                
-            x = torch.cat(outs, dim=1)
+        #     q_lens = torch.full(
+        #         (q.shape[0],), q_slice.size(1),
+        #         device=q.device, dtype=torch.int32,
+        #     )
+        #     k_lens = torch.full(
+        #         (q.shape[0],), k_slice.size(1),
+        #         device=q.device, dtype=torch.int32,
+        #     )
+        #     outs.append(
+        #         flash_attention(
+        #             q=q_slice,
+        #             k=k_slice,
+        #             v=v_slice,
+        #             q_lens=q_lens,
+        #             k_lens=k_lens,
+        #             window_size=self.window_size,
+        #         )
+        #     )
+            
+        # x = torch.cat(outs, dim=1)
 
 
         # output

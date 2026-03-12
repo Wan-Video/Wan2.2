@@ -66,7 +66,16 @@ def _validate_args(args):
     assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
 
     if args.prompt is None:
-        args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
+         ########## Prompt Relay (Replace prompt if prompt_filepath json is provided) ########## 
+        if args.prompt_filepath is not None:
+            import json
+            with open(args.prompt_filepath, 'r') as f:
+                prompt_data = json.load(f)
+            full_prompt = prompt_data.get("global_prompt", "")
+            local_prompts = prompt_data.get("local_prompts", [])
+            args.prompt = full_prompt + " ".join(local_prompts)
+        else:
+            args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
     if args.image is None and "image" in EXAMPLE_PROMPT[args.task]:
         args.image = EXAMPLE_PROMPT[args.task]["image"]
     if args.audio is None and args.enable_tts is False and "audio" in EXAMPLE_PROMPT[args.task]:
@@ -107,12 +116,15 @@ def _parse_args():
         description="Generate a image or video from a text prompt or image using Wan"
     )
 
+    ########## Prompt Relay Prompt Input ########## 
     parser.add_argument(
         "--prompt_filepath",
         type=str,
         default=None,
         help="The file of the input prompts containing the timesteps for each prompt."
     )
+    ################################################## 
+
     parser.add_argument(
         "--task",
         type=str,

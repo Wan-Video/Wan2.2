@@ -1,25 +1,11 @@
 {
-  "global_prompt": "High contrast lighting, cinematic atmosphere, 35mm film grain, shallow depth of field, realistic handheld camera motion, movie still, 8k resolution.",
-  
-  "scene_prompts": [
-    "  A handheld, front-facing, selfie perspective of a man filming himself at arm’s length, as if he is vlogging. The framing feels intimate and direct, with the camera clearly handheld."
-  ],
-  
-  "mapping": {
-    "1": [1, 2, 3]
-  },
+  "global_prompt": "A single continuous shallow-depth-of-field cinematic tracking shot, with elegant camera movement. A monkey eating a banana walks out of an elevator into a modern office. Two office workers look shocked as the monkey walks by.",
   
   "local_prompts": [
-    " The man looks directly into the lens, centered in frame. standing on a busy street in Hong Kong. Neon signs glow behind him, skyscrapers loom overhead, and crowds move in the background. The lighting is vibrant and urban, while the man remains centered and continues looking directly into the camera.",
+    "The shot begins on the closed elevator doors in a quiet modern office hallway. The elevator doors slide open to reveal only the monkey's hairy feet. The camera starts low at floor level, tightly framed on the monkey's feet, and tracks backward smoothly as the monkey steps out of the elevator and begins walking forward.",
+
+    "The camera continues tracking the monkey for several steps as he walks, then begins a smooth rising arc around the front of his body. As it arcs and lifts from a low angle to a higher medium shot, with the camera always staying in front of the monkey. it gradually reveals his figure and face while he keeps walking forward. The camera keeps gliding backward in front of him and rises further into a close frontal shot of the monkey's face. The camera holds on his face in the same uninterrupted motion as he eats the banana.",
     
-    " The man raises his hand toward the camera. His palm moves closer until his hand completely fills the frame and covers the camera, smoothly blocking the lens and cutting off the scene.",
-    
-    " The hand pulls away from the lens, revealing the man in the same framing but now is filming himself in the grand canyons. The lighting is dramatic, with strong contrasts."
-  ],
-  
-  "dependency": {
-    "1": [2, 3],
-    "2": [1, 3],
-    "3": [1, 2]
-  }
+    "The camera then pans to the left, revealing two men in formal attire staring in shock as the monkey walks past. Their eyes are wide and their mouths hang open in disbe`lief."
+  ]
 }
