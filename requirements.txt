@@ -14,3 +14,6 @@ dashscope
 imageio-ffmpeg
 flash_attn
 numpy>=1.23.5,<2
+decord
+librosa
+peft==0.17.1
