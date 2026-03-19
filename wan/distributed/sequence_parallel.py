@@ -68,11 +68,13 @@ def sp_dit_forward(
     context,
     seq_len,
     y=None,
+    mask=None,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
     t:              [B].
     context:        A list of text embeddings each with shape [L, C].
+    mask:           Time embeddings mask tensor
     """
     if self.model_type == 'i2v':
         assert y is not None
@@ -97,16 +99,41 @@ def sp_dit_forward(
     ])
 
     # time embeddings
-    if t.dim() == 1:
-        t = t.expand(t.size(0), seq_len)
+    assert t.dim() == 1
+    assert t.size(0) == 1
+    world_size = get_world_size()
     with torch.amp.autocast('cuda', dtype=torch.float32):
         bt = t.size(0)
-        t = t.flatten()
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim,
-                                    t).unflatten(0, (bt, seq_len)).float())
+                                    t).unflatten(0, (bt, 1)).float())
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
+
+    if mask is None:
+        seq_len_tmp = seq_len // world_size
+        e = e.repeat(1, seq_len_tmp, 1)
+        e0 = e0.repeat(1, seq_len_tmp, 1, 1)
+    else:
+        if self.e_zero is None or self.e0_zero is None:
+            t_zero = torch.tensor([0], device=device)
+            with torch.amp.autocast('cuda', dtype=torch.float32):
+                self.e_zero = self.time_embedding(
+                    sinusoidal_embedding_1d(self.freq_dim,
+                                            t_zero).unflatten(0, (1, 1)).float())
+                self.e0_zero = self.time_projection(self.e_zero).unflatten(2, (6, self.dim))
+                assert self.e_zero.dtype == torch.float32 and self.e0_zero.dtype == torch.float32
+
+        e = e.repeat(1, seq_len, 1)
+        e0 = e0.repeat(1, seq_len, 1, 1)
+
+        zero_mask = (mask == 0)
+        if zero_mask.any():
+            e[:, zero_mask, :] = self.e_zero
+            e0[:, zero_mask, :] = self.e0_zero
+
+        e = torch.chunk(e, world_size, dim=1)[get_rank()]
+        e0 = torch.chunk(e0, world_size, dim=1)[get_rank()]
 
     # context
     context_lens = None
@@ -118,8 +145,6 @@ def sp_dit_forward(
 
     # Context Parallel
     x = torch.chunk(x, get_world_size(), dim=1)[get_rank()]
-    e = torch.chunk(e, get_world_size(), dim=1)[get_rank()]
-    e0 = torch.chunk(e0, get_world_size(), dim=1)[get_rank()]
 
     # arguments
     kwargs = dict(
