@@ -6,3 +6,4 @@ matplotlib
 -e  git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266#egg=SAM-2 
 loguru
 sentencepiece
+moviepy
