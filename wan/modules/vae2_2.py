@@ -6,6 +6,7 @@ import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from tqdm import tqdm
 
 __all__ = [
     "Wan2_2_VAE",
@@ -818,7 +819,7 @@ class WanVAE_(nn.Module):
             z = z / scale[1] + scale[0]
         iter_ = z.shape[2]
         x = self.conv2(z)
-        for i in range(iter_):
+        for i in tqdm(range(iter_)):
             self._conv_idx = [0]
             if i == 0:
                 out = self.decoder(
