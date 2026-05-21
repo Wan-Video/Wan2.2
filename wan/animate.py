@@ -1,8 +1,11 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import gc
 import logging
 import math
 import os
 import cv2
+import random
+import sys
 import types
 from copy import deepcopy
 from functools import partial
@@ -15,25 +18,22 @@ from peft import set_peft_model_state_dict
 from decord import VideoReader
 from tqdm import tqdm
 import torch.nn.functional as F
+from .pipeline_base import WanPipelineBase
 from .distributed.fsdp import shard_model
 from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
 from .distributed.util import get_world_size
 
 from .modules.animate import WanAnimateModel
 from .modules.animate import CLIPModel
-from .modules.t5 import T5EncoderModel
+from .modules.animate.face_blocks import FaceEncoder
+from .modules.animate.motion_encoder import MotionEncoder
+from .modules.animate.xlm_roberta import XLMRobertaEncoder
 from .modules.vae2_1 import Wan2_1_VAE
 from .modules.animate.animate_utils import TensorList, get_loraconfig
-from .utils.fm_solvers import (
-    FlowDPMSolverMultistepScheduler,
-    get_sampling_sigmas,
-    retrieve_timesteps,
-)
-from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 
 
-class WanAnimate:
+class WanAnimate(WanPipelineBase):
 
     def __init__(
         self,
@@ -47,98 +47,60 @@ class WanAnimate:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
-        use_relighting_lora=False
     ):
-        r"""
-        Initializes the generation model components.
-
-        Args:
-            config (EasyDict):
-                Object containing model parameters initialized from config.py
-            checkpoint_dir (`str`):
-                Path to directory containing model checkpoints
-            device_id (`int`,  *optional*, defaults to 0):
-                Id of target GPU device
-            rank (`int`,  *optional*, defaults to 0):
-                Process rank for distributed training
-            t5_fsdp (`bool`, *optional*, defaults to False):
-                Enable FSDP sharding for T5 model
-            dit_fsdp (`bool`, *optional*, defaults to False):
-                Enable FSDP sharding for DiT model
-            use_sp (`bool`, *optional*, defaults to False):
-                Enable distribution strategy of sequence parallel.
-            t5_cpu (`bool`, *optional*, defaults to False):
-                Whether to place T5 model on CPU. Only works without t5_fsdp.
-            init_on_cpu (`bool`, *optional*, defaults to True):
-                Enable initializing Transformer Model on CPU. Only works without FSDP or USP.
-            convert_model_dtype (`bool`, *optional*, defaults to False):
-                Convert DiT model parameters dtype to 'config.param_dtype'.
-                Only works without FSDP.
-            use_relighting_lora (`bool`, *optional*, defaults to False):
-               Whether to use relighting lora for character replacement. 
-        """
-        self.device = torch.device(f"cuda:{device_id}")
-        self.config = config
-        self.rank = rank
-        self.t5_cpu = t5_cpu
-        self.init_on_cpu = init_on_cpu
-
-        self.num_train_timesteps = config.num_train_timesteps
-        self.param_dtype = config.param_dtype
-
-        if t5_fsdp or dit_fsdp or use_sp:
-            self.init_on_cpu = False
-
-        shard_fn = partial(shard_model, device_id=device_id)
-        self.text_encoder = T5EncoderModel(
-            text_len=config.text_len,
-            dtype=config.t5_dtype,
-            device=torch.device('cpu'),
-            checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
-            tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
-            shard_fn=shard_fn if t5_fsdp else None,
+        super().__init__(
+            config=config,
+            checkpoint_dir=checkpoint_dir,
+            device_id=device_id,
+            rank=rank,
+            t5_fsdp=t5_fsdp,
+            dit_fsdp=dit_fsdp,
+            use_sp=use_sp,
+            t5_cpu=t5_cpu,
+            init_on_cpu=init_on_cpu,
+            convert_model_dtype=convert_model_dtype,
         )
 
+        shard_fn = partial(shard_model, device_id=device_id)
+
+        # Animate-specific encoders
         self.clip = CLIPModel(
-            dtype=torch.float16,
-            device=self.device,
-            checkpoint_path=os.path.join(checkpoint_dir,
-                                         config.clip_checkpoint),
-            tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
+            dtype=config.clip_dtype,
+            device=torch.device('cpu'),
+            checkpoint_path=os.path.join(checkpoint_dir, config.clip_checkpoint),
+            tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer),
+        )
 
-        self.vae = Wan2_1_VAE(
-            vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device=self.device)
-
-        logging.info(f"Creating WanAnimate from {checkpoint_dir}")
-
-        if not dit_fsdp:
-            self.noise_model = WanAnimateModel.from_pretrained(
-                checkpoint_dir,
-                torch_dtype=self.param_dtype,
-                device_map=self.device)
-        else:
-            self.noise_model = WanAnimateModel.from_pretrained(
-                checkpoint_dir, torch_dtype=self.param_dtype)
-
-        self.noise_model = self._configure_model(
-            model=self.noise_model,
+        logging.info(f"creating WanAnimateModel from {checkpoint_dir}")
+        self.model = WanAnimateModel.from_pretrained(checkpoint_dir, subfolder=config.checkpoint)
+        self.model = self._configure_model(
+            model=self.model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype,
-            use_lora=use_relighting_lora,
-            checkpoint_dir=checkpoint_dir,
-            config=config
-            )
+            convert_model_dtype=convert_model_dtype)
 
-        if use_sp:
-            self.sp_size = get_world_size()
-        else:
-            self.sp_size = 1
+        self.face_encoder = FaceEncoder(
+            checkpoint_path=os.path.join(
+                checkpoint_dir, config.face_checkpoint),
+            device=self.device)
 
-        self.sample_neg_prompt = config.sample_neg_prompt
+        self.xlmroberta = XLMRobertaEncoder(
+            device=self.device,
+        )
+
+        self.motion_encoder = MotionEncoder(
+            checkpoint_path=os.path.join(
+                checkpoint_dir, config.motion_checkpoint),
+            device=self.device,
+        )
+
         self.sample_prompt = config.prompt
+
+    def _init_vae(self, config, checkpoint_dir):
+        self.vae = Wan2_1_VAE(
+            vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
+            device=self.device)
 
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,

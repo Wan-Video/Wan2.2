@@ -244,7 +244,7 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         return x
 
 
-class WanModel_S2V(ModelMixin, ConfigMixin):
+class WanS2VModel(ModelMixin, ConfigMixin):
     ignore_for_config = [
         'args', 'kwargs', 'patch_size', 'cross_attn_norm', 'qk_norm',
         'text_dim', 'window_size'

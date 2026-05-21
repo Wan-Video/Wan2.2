@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ['XLMRoberta', 'xlm_roberta_large']
+__all__ = ['XLMRoberta', 'XLMRobertaEncoder', 'xlm_roberta_large']
 
 
 class SelfAttention(nn.Module):
@@ -141,6 +141,23 @@ class XLMRoberta(nn.Module):
         if not self.post_norm:
             x = self.norm(x)
         return x
+
+
+class XLMRobertaEncoder(nn.Module):
+    """Wrapper around XLMRoberta that initializes the large model on device."""
+
+    def __init__(self, device="cuda"):
+        super().__init__()
+        self.model = xlm_roberta_large(device=device)
+        self.model.eval().requires_grad_(False)
+        self.device = device
+
+    @torch.no_grad()
+    def forward(self, ids):
+        return self.model(ids)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
 
 
 def xlm_roberta_large(pretrained=False,

@@ -102,7 +102,7 @@ def _validate_args(args):
             task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
-def _parse_args():
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="Generate a image or video from a text prompt or image using Wan"
     )
@@ -294,9 +294,94 @@ def _parse_args():
         default=80,
         help="Number of frames per clip, 48 or 80 or others (must be multiple of 4) for 14B s2v"
     )
-    args = parser.parse_args()
-    _validate_args(args)
+    return parser
 
+
+def parse_args(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    _validate_args(args)
+    return args
+
+
+# Aliases for HTTP / job JSON (model id -> --task value)
+JOB_MODEL_ALIASES = {
+    "wan2.2-t2v-a14b": "t2v-A14B",
+    "wan2.2-i2v-a14b": "i2v-A14B",
+    "wan2.2-ti2v-5b": "ti2v-5B",
+    "wan2.2-s2v-14b": "s2v-14B",
+    "wan2.2-animate-14b": "animate-14B",
+}
+
+
+def _resolve_task_name(model_or_task):
+    """Map API model id or task string to a WAN_CONFIGS key."""
+    raw = str(model_or_task).strip()
+    low = raw.lower()
+    if low in JOB_MODEL_ALIASES:
+        return JOB_MODEL_ALIASES[low]
+    for k in WAN_CONFIGS:
+        if k.lower() == low:
+            return k
+    return raw
+
+
+def _flatten_job_dict(job):
+    """Merge nested API shape (model, input, parameters) into flat CLI keys."""
+    if not isinstance(job, dict):
+        raise TypeError("job must be a dict")
+    out = {}
+    model = job.get("model")
+    if model is not None:
+        out["task"] = _resolve_task_name(model)
+    for section in ("input", "parameters"):
+        sub = job.get(section)
+        if isinstance(sub, dict):
+            out.update(sub)
+    for k, v in job.items():
+        if k in ("input", "parameters", "model"):
+            continue
+        out[k] = v
+    if "task" in out:
+        out["task"] = _resolve_task_name(out["task"])
+    return out
+
+
+def _apply_job_value_to_args(name, value, args):
+    if value is None:
+        return
+    if name == "sample_guide_scale":
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                setattr(args, name, float(value[0]))
+            else:
+                setattr(args, name, tuple(float(x) for x in value))
+        else:
+            setattr(args, name, float(value))
+        return
+    if name == "offload_model":
+        if isinstance(value, bool):
+            setattr(args, name, value)
+        else:
+            setattr(args, name, str2bool(str(value)))
+        return
+    setattr(args, name, value)
+
+
+def args_from_job_dict(job):
+    """
+    Build a validated argparse.Namespace from a JSON-serializable job dict.
+    Keys match generate.py CLI flags; optional nested ``input`` / ``parameters``
+    and ``model`` alias are supported for DashScope-style payloads.
+    """
+    parser = _build_parser()
+    args = parser.parse_args([])
+    flat = _flatten_job_dict(job)
+    for key, value in flat.items():
+        if not hasattr(args, key):
+            raise ValueError(f"Unknown job field: {key}")
+        _apply_job_value_to_args(key, value, args)
+    _validate_args(args)
     return args
 
 
@@ -571,5 +656,5 @@ def generate(args):
 
 
 if __name__ == "__main__":
-    args = _parse_args()
+    args = parse_args()
     generate(args)

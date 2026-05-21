@@ -1,0 +1,96 @@
+# Wan2.2 Master Node: Redis + API + Worker0 (4×A100 40GB).
+#
+# Each node runs its own torchrun locally; NCCL rendezvous connects them.
+# No SSH needed — master signals worker1 via Redis pub/sub.
+#
+# IMPORTANT: worker0 uses network_mode: host so torchrun/NCCL can bind
+# ports directly on the host. Redis and API remain on the default bridge
+# network; worker0 accesses Redis via host.docker.internal or host IP.
+#
+# Prerequisites: NVIDIA Container Toolkit; Docker Compose v2.
+#
+# Usage:
+#   cp docker/compose.env.example .env
+#   # edit .env (WAN_SERVE_API_KEYS, WAN_CKPT_HOST_PATH, WAN_MASTER_ADDR)
+#
+#   docker compose up -d --build
+#
+# On the secondary server, use docker-compose.worker.yml:
+#   docker compose -f docker-compose.worker.yml up -d --build
+#
+# Logs:  docker compose logs -f api
+#        docker compose logs -f worker0
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - wan_redis:/data
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    restart: unless-stopped
+    ports:
+      - "${WAN_API_PORT:-8008}:8008"
+    environment:
+      WAN_REDIS_URL: redis://redis:6379/0
+      WAN_SERVE_API_KEYS: ${WAN_SERVE_API_KEYS:?set WAN_SERVE_API_KEYS in .env}
+      WAN_REPO_ROOT: /app
+      WAN_CKPT_DIR: /ckpt
+      WAN_JOB_DIR: /data/jobs
+      WAN_OUTPUT_DIR: /data/outputs
+      WAN_API_HOST: 0.0.0.0
+      WAN_API_PORT: "8008"
+    volumes:
+      - ${WAN_DATA_HOST_PATH:-./data}:/data
+    depends_on:
+      - redis
+
+  worker0:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    shm_size: "16g"
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # Redis is on host; use localhost or the host's real IP
+      WAN_REDIS_URL: ${WAN_REDIS_URL_LOCAL:-redis://127.0.0.1:6379/0}
+      WAN_SERVE_API_KEYS: ${WAN_SERVE_API_KEYS}
+      WAN_REPO_ROOT: /app
+      WAN_CKPT_DIR: /ckpt
+      WAN_JOB_DIR: /data/jobs
+      WAN_OUTPUT_DIR: /data/outputs
+      WAN_NODE_ROLE: master
+      WAN_NNODES: ${WAN_NNODES:-2}
+      WAN_NPROC_PER_NODE: ${WAN_NPROC_PER_NODE:-4}
+      WAN_NODE_RANK: 0
+      # With host network, use the host's real IP (not 0.0.0.0)
+      WAN_MASTER_ADDR: ${WAN_MASTER_ADDR:-127.0.0.1}
+      WAN_MASTER_PORT: ${WAN_MASTER_PORT:-29500}
+      WAN_RDZV_PREFIX: ${WAN_RDZV_PREFIX:-wan}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NCCL_DEBUG: INFO
+      NCCL_SOCKET_IFNAME: ${NCCL_SOCKET_IFNAME:-^docker0,lo}
+      NCCL_IB_DISABLE: "1"
+      NCCL_TIMEOUT: ${NCCL_TIMEOUT:-1800}
+    volumes:
+      - ${WAN_DATA_HOST_PATH:-./data}:/data
+      - ${WAN_CKPT_HOST_PATH:-./.wan_ckpt_placeholder}:/ckpt:ro
+
+volumes:
+  wan_redis:

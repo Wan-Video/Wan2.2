@@ -5,3 +5,4 @@ tmp_examples*
 new_checkpoint*
 batch_test*
 nohup*
+.wan_ckpt_placeholder/

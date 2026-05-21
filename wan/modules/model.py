@@ -458,7 +458,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # time embeddings
         if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
+            t = t.unsqueeze(1).expand(t.size(0), seq_len)
         with torch.amp.autocast('cuda', dtype=torch.float32):
             bt = t.size(0)
             t = t.flatten()

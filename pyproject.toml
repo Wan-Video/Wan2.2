@@ -39,6 +39,12 @@ dev = [
     "mypy",
     "huggingface-hub[cli]"
 ]
+serve = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "redis>=5.0.0",
+    "pydantic>=2.0.0",
+]
 
 [project.urls]
 homepage = "https://wanxai.com"

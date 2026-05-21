@@ -1,0 +1,34 @@
+# GPU worker: Wan2.2 + queue consumer. Build from repository root:
+#   docker build -f docker/Dockerfile.worker -t wan2-worker:latest .
+#
+# Optional: --build-arg INSTALL_FLASH_ATTN=1 (may fail if CUDA/toolchain mismatch)
+ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM ${BASE_IMAGE}
+
+ARG INSTALL_FLASH_ATTN=0
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+USER root
+
+COPY requirements.txt /tmp/requirements.txt
+RUN sed '/^flash_attn$/d' /tmp/requirements.txt > /tmp/requirements.noflash.txt \
+    && pip install --upgrade pip \
+    && pip install -r /tmp/requirements.noflash.txt
+
+RUN if [ "$INSTALL_FLASH_ATTN" = "1" ]; then \
+      pip install flash_attn --no-build-isolation || true; \
+    fi
+
+COPY requirements_serve.txt /tmp/requirements_serve.txt
+RUN pip install -r /tmp/requirements_serve.txt
+
+COPY . .
+
+RUN chmod +x /app/docker/entrypoint-worker.sh
+
+ENTRYPOINT ["/app/docker/entrypoint-worker.sh"]

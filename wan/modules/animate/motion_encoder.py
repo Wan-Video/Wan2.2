@@ -305,3 +305,22 @@ class Generator(nn.Module):
         with torch.cuda.amp.autocast(dtype=torch.float32):
             motion = self.dec.direction(motion_feat)
         return motion
+
+
+class MotionEncoder(nn.Module):
+    """Wrapper around Generator that loads from checkpoint and extracts motion features."""
+
+    def __init__(self, checkpoint_path, device="cuda", size=256, style_dim=512, motion_dim=20):
+        super().__init__()
+        self.generator = Generator(size, style_dim, motion_dim)
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        self.generator.load_state_dict(state_dict)
+        self.generator.to(device).eval()
+        self.device = device
+
+    @torch.no_grad()
+    def forward(self, img):
+        return self.generator.get_motion(img)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)

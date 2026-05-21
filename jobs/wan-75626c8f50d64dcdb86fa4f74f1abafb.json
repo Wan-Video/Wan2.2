@@ -1,0 +1,12 @@
+{
+  "model": "wan2.2-t2v-a14b",
+  "prompt": "A cat walking on grass.",
+  "size": "1280*720",
+  "offload_model": false,
+  "ulysses_size": 8,
+  "t5_fsdp": true,
+  "dit_fsdp": true,
+  "convert_model_dtype": true,
+  "ckpt_dir": "/home/HPCBase/LLM/Wan-AI/Wan2.2-T2V-A14B",
+  "save_file": "/home/HPCBase/PACKAGE/linlei/Wan2.2/wan22-lin/out/wan-75626c8f50d64dcdb86fa4f74f1abafb.mp4"
+}

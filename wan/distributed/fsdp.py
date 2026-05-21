@@ -18,7 +18,7 @@ def shard_model(
     process_group=None,
     sharding_strategy=ShardingStrategy.FULL_SHARD,
     sync_module_states=True,
-    use_lora=False
+    use_lora=False,
 ):
     model = FSDP(
         module=model,

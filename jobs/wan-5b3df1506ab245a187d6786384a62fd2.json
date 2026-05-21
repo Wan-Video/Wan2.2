@@ -1,0 +1,13 @@
+{
+  "model": "wan2.2-t2v-a14b",
+  "prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
+  "size": "832*480",
+  "offload_model": true,
+  "ulysses_size": 8,
+  "t5_fsdp": true,
+  "t5_cpu": true,
+  "dit_fsdp": true,
+  "convert_model_dtype": true,
+  "ckpt_dir": "/home/HPCBase/LLM/Wan-AI/Wan2.2-T2V-A14B",
+  "save_file": "/home/HPCBase/PACKAGE/linlei/Wan2.2/wan22-lin/out/wan-5b3df1506ab245a187d6786384a62fd2.mp4"
+}

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wan2.2 Video Generation</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f0f1a; color:#e0e0e0; min-height:100vh; }
+.container { max-width:800px; margin:0 auto; padding:20px; }
+h1 { text-align:center; font-size:1.8em; margin:20px 0 10px; color:#7c6ff7; }
+.subtitle { text-align:center; font-size:0.9em; color:#888; margin-bottom:30px; }
+
+.auth-bar { display:flex; align-items:center; gap:8px; margin-bottom:20px; padding:10px 14px; background:#1a1a2e; border-radius:8px; }
+.auth-bar label { font-size:0.85em; color:#aaa; white-space:nowrap; }
+.auth-bar input { flex:1; background:#12122a; border:1px solid #333; border-radius:6px; padding:8px 12px; color:#e0e0e0; font-size:0.85em; }
+
+.card { background:#1a1a2e; border-radius:12px; padding:24px; margin-bottom:16px; }
+.card-title { font-size:1.1em; color:#7c6ff7; margin-bottom:16px; }
+
+.form-group { margin-bottom:14px; }
+.form-group label { display:block; font-size:0.85em; color:#aaa; margin-bottom:4px; }
+.form-group select, .form-group input[type="text"], .form-group input[type="number"], .form-group textarea {
+  width:100%; background:#12122a; border:1px solid #333; border-radius:6px; padding:10px 12px;
+  color:#e0e0e0; font-size:0.95em; transition:border 0.2s;
+}
+.form-group select:focus, .form-group input:focus, .form-group textarea:focus { border-color:#7c6ff7; outline:none; }
+.form-group textarea { resize:vertical; min-height:100px; }
+
+.upload-group { display:flex; gap:8px; align-items:center; }
+.upload-group input[type="text"] { flex:1; }
+.upload-btn { padding:10px 14px; background:#2a2a4e; color:#7c6ff7; border:1px solid #333;
+  border-radius:6px; cursor:pointer; font-size:0.85em; white-space:nowrap; transition:background 0.2s; }
+.upload-btn:hover { background:#3a3a5e; }
+.upload-btn.uploading { color:#4da6ff; }
+.upload-status { font-size:0.8em; color:#4dff88; margin-top:4px; }
+.upload-preview { max-width:100%; max-height:120px; border-radius:6px; margin-top:6px; }
+input[type="file"] { display:none; }
+
+.form-row { display:flex; gap:12px; }
+.form-row .form-group { flex:1; }
+
+.adv-toggle { display:flex; align-items:center; gap:8px; cursor:pointer; color:#7c6ff7; font-size:0.9em; margin-top:8px; }
+.adv-toggle::before { content:'▶'; font-size:0.7em; transition:transform 0.2s; }
+.adv-toggle.open::before { transform:rotate(90deg); }
+.adv-section { display:none; margin-top:12px; }
+.adv-section.show { display:block; }
+
+.btn { width:100%; padding:14px; border:none; border-radius:8px; font-size:1em; font-weight:600;
+  cursor:pointer; transition:background 0.2s, transform 0.1s; }
+.btn-primary { background:#7c6ff7; color:#fff; }
+.btn-primary:hover { background:#6b5de6; }
+.btn-primary:active { transform:scale(0.98); }
+.btn-primary:disabled { background:#555; cursor:not-allowed; }
+
+.status-card { background:#1a1a2e; border-radius:12px; padding:24px; margin-top:16px; }
+.status-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.task-id { font-size:0.85em; color:#888; }
+.status-badge { padding:4px 12px; border-radius:20px; font-size:0.85em; font-weight:600; }
+.status-PENDING { background:#2a2a4e; color:#888; }
+.status-RUNNING { background:#1a3a5e; color:#4da6ff; }
+.status-SUCCEEDED { background:#1a4e2a; color:#4dff88; }
+.status-FAILED { background:#4e1a1a; color:#ff4d4d; }
+
+.progress-bar { width:100%; height:6px; background:#2a2a4e; border-radius:3px; margin:12px 0; overflow:hidden; }
+.progress-fill { height:100%; background:#4da6ff; border-radius:3px; width:0%; transition:width 0.3s; }
+.progress-fill.done { background:#4dff88; }
+.progress-fill.fail { background:#ff4d4d; }
+
+.video-container { margin-top:16px; text-align:center; }
+.video-container video { max-width:100%; border-radius:8px; }
+.download-link { display:inline-block; margin-top:10px; padding:8px 20px; background:#1a4e2a; color:#4dff88;
+  border-radius:6px; text-decoration:none; font-size:0.9em; }
+.download-link:hover { background:#2a5e3a; }
+
+.error-msg { color:#ff4d4d; font-size:0.85em; margin-top:8px; }
+
+.jobs-list { margin-top:20px; }
+.jobs-item { display:flex; justify-content:space-between; align-items:center; padding:10px 14px;
+  background:#1a1a2e; border-radius:8px; margin-bottom:8px; cursor:pointer; transition:background 0.2s; }
+.jobs-item:hover { background:#22223e; }
+.jobs-item .prompt { font-size:0.85em; color:#ccc; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.jobs-item .meta { font-size:0.75em; color:#888; }
+
+@media (max-width:600px) {
+  .container { padding:12px; }
+  .card { padding:16px; }
+  .form-row { flex-direction:column; gap:0; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎬 Wan2.2 Video Generation</h1>
+  <p class="subtitle">Generate videos from text prompts, images, and audio</p>
+
+  <div class="auth-bar">
+    <label>API Key:</label>
+    <input type="password" id="apiKey" placeholder="sk-xxxx" oninput="saveApiKey()">
+  </div>
+
+  <div class="card">
+    <div class="card-title">New Generation</div>
+
+    <div class="form-group">
+      <label>Model</label>
+      <select id="model" onchange="onModelChange()">
+        <option value="wan2.2-t2v-a14b">Text-to-Video (14B)</option>
+        <option value="wan2.2-i2v-a14b">Image-to-Video (14B)</option>
+        <option value="wan2.2-ti2v-5b">Text+Image-to-Video (5B)</option>
+        <option value="wan2.2-s2v-14b">Speech-to-Video (14B)</option>
+        <option value="wan2.2-animate-14b">Animate (14B)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Prompt</label>
+      <textarea id="prompt" placeholder="Describe the video you want to generate..."></textarea>
+    </div>
+
+    <div class="form-group" id="imageGroup" style="display:none">
+      <label>Reference Image</label>
+      <div class="upload-group">
+        <input type="text" id="image" placeholder="Server path or upload">
+        <button class="upload-btn" onclick="document.getElementById('imageFile').click()">Upload</button>
+        <input type="file" id="imageFile" accept="image/*" onchange="uploadFile('imageFile','image','image')">
+      </div>
+      <div id="imageStatus" class="upload-status"></div>
+      <img id="imagePreview" class="upload-preview" style="display:none">
+    </div>
+
+    <div class="form-group" id="audioGroup" style="display:none">
+      <label>Audio</label>
+      <div class="upload-group">
+        <input type="text" id="audio" placeholder="Server path or upload">
+        <button class="upload-btn" onclick="document.getElementById('audioFile').click()">Upload</button>
+        <input type="file" id="audioFile" accept="audio/*,.wav,.mp3" onchange="uploadFile('audioFile','audio','audio')">
+      </div>
+      <div id="audioStatus" class="upload-status"></div>
+    </div>
+
+    <div class="form-group" id="videoGroup" style="display:none">
+      <label>Reference Video</label>
+      <div class="upload-group">
+        <input type="text" id="video" placeholder="Server path or upload">
+        <button class="upload-btn" onclick="document.getElementById('videoFile').click()">Upload</button>
+        <input type="file" id="videoFile" accept="video/*,.mp4" onchange="uploadFile('videoFile','video','video')">
+      </div>
+      <div id="videoStatus" class="upload-status"></div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Resolution</label>
+        <select id="size"></select>
+      </div>
+      <div class="form-group">
+        <label>Frames</label>
+        <input type="number" id="frameNum" value="81" min="5" max="161">
+      </div>
+    </div>
+
+    <div class="adv-toggle" onclick="toggleAdvanced()">Advanced Options</div>
+    <div class="adv-section" id="advSection">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Solver</label>
+          <select id="solver">
+            <option value="dpm++">DPM++ (faster)</option>
+            <option value="unipc">UniPC (higher quality)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Steps</label>
+          <input type="number" id="steps" value="20" min="5" max="100">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Seed</label>
+          <input type="number" id="seed" value="-1" min="-1" placeholder="-1 for random">
+        </div>
+        <div class="form-group">
+          <label>Guide Scale</label>
+          <input type="text" id="guideScale" value="" placeholder="auto">
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="submitBtn" onclick="submitJob()" style="margin-top:16px">
+      Generate Video
+    </button>
+    <div id="errorMsg" class="error-msg" style="display:none"></div>
+  </div>
+
+  <div id="statusSection" style="display:none">
+    <div class="status-card">
+      <div class="status-header">
+        <span class="task-id" id="taskIdDisplay"></span>
+        <span class="status-badge" id="statusBadge">PENDING</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div id="statusMessage" style="font-size:0.85em;color:#888;margin-top:4px"></div>
+      <div id="videoResult" class="video-container" style="display:none">
+        <video id="videoPlayer" controls></video>
+        <a id="downloadLink" class="download-link" download>⬇ Download Video</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="jobs-list" id="jobsList"></div>
+</div>
+
+<script>
+const MODELS = {
+  'wan2.2-t2v-a14b':   { sizes: ['832*480','1280*720','720*1280','1920*1080','1080*1920'], needsImage: false, needsAudio: false, needsVideo: false },
+  'wan2.2-i2v-a14b':   { sizes: ['832*480','1280*720','720*1280','1920*1080','1080*1920'], needsImage: true,  needsAudio: false, needsVideo: false },
+  'wan2.2-ti2v-5b':    { sizes: ['704*1280','1280*704'],                                   needsImage: true,  needsAudio: false, needsVideo: false },
+  'wan2.2-s2v-14b':    { sizes: ['832*480','1280*720','720*1280','1920*1080','1080*1920','1024*704','704*1024','704*1280','1280*704'], needsImage: true, needsAudio: true, needsVideo: false },
+  'wan2.2-animate-14b': { sizes: ['720*1280','1280*720'],                                  needsImage: false, needsAudio: false, needsVideo: true  },
+};
+
+let pollTimer = null;
+let recentJobs = JSON.parse(localStorage.getItem('wan_jobs') || '[]');
+
+function saveApiKey() { sessionStorage.setItem('wan_api_key', document.getElementById('apiKey').value); }
+function getApiKey() { return sessionStorage.getItem('wan_api_key') || document.getElementById('apiKey').value; }
+
+function onModelChange() {
+  const model = document.getElementById('model').value;
+  const info = MODELS[model];
+  const sizeSelect = document.getElementById('size');
+  sizeSelect.innerHTML = '';
+  info.sizes.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    sizeSelect.appendChild(opt);
+  });
+  document.getElementById('imageGroup').style.display = info.needsImage ? 'block' : 'none';
+  document.getElementById('audioGroup').style.display = info.needsAudio ? 'block' : 'none';
+  document.getElementById('videoGroup').style.display = info.needsVideo ? 'block' : 'none';
+}
+
+function toggleAdvanced() {
+  document.querySelector('.adv-toggle').classList.toggle('open');
+  document.getElementById('advSection').classList.toggle('show');
+}
+
+async function uploadFile(fileInputId, targetId, category) {
+  const fileInput = document.getElementById(fileInputId);
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const statusEl = document.getElementById(targetId + 'Status');
+  const btn = fileInput.parentElement.querySelector('.upload-btn');
+  btn.classList.add('uploading');
+  btn.textContent = 'Uploading...';
+  statusEl.textContent = '';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('category', category);
+
+    const res = await fetch('/api/v1/files/upload', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + getApiKey() },
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      statusEl.textContent = 'Upload failed: ' + (err.detail || res.status);
+      statusEl.style.color = '#ff4d4d';
+      return;
+    }
+    const data = await res.json();
+    document.getElementById(targetId).value = data.path;
+    statusEl.textContent = '✓ Uploaded: ' + file.name;
+    statusEl.style.color = '#4dff88';
+
+    // Show image preview
+    if (category === 'image') {
+      const preview = document.getElementById('imagePreview');
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = 'block';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Upload error: ' + e.message;
+    statusEl.style.color = '#ff4d4d';
+  } finally {
+    btn.classList.remove('uploading');
+    btn.textContent = 'Upload';
+  }
+}
+
+async function submitJob() {
+  const btn = document.getElementById('submitBtn');
+  const errDiv = document.getElementById('errorMsg');
+  btn.disabled = true;
+  errDiv.style.display = 'none';
+
+  const model = document.getElementById('model').value;
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) { errDiv.textContent = 'Prompt is required'; errDiv.style.display = 'block'; btn.disabled = false; return; }
+
+  const body = { model, input: { prompt }, parameters: { size: document.getElementById('size').value, frame_num: parseInt(document.getElementById('frameNum').value) || 81 } };
+
+  if (MODELS[model].needsImage) { const v = document.getElementById('image').value.trim(); if (v) body.input.image = v; }
+  if (MODELS[model].needsAudio) { const v = document.getElementById('audio').value.trim(); if (v) body.input.audio = v; }
+  if (MODELS[model].needsVideo) { const v = document.getElementById('video').value.trim(); if (v) body.input.video = v; }
+
+  const solver = document.getElementById('solver').value;
+  const steps = parseInt(document.getElementById('steps').value);
+  const seed = parseInt(document.getElementById('seed').value);
+  const gs = document.getElementById('guideScale').value.trim();
+  if (solver) body.parameters.sample_solver = solver;
+  if (steps) body.parameters.sample_steps = steps;
+  if (seed >= 0) body.parameters.base_seed = seed;
+  if (gs) {
+    try { body.parameters.sample_guide_scale = JSON.parse(gs); } catch { body.parameters.sample_guide_scale = parseFloat(gs); }
+  }
+
+  try {
+    const res = await fetch('/api/v1/video/generation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getApiKey() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      errDiv.textContent = err.detail || `HTTP ${res.status}`;
+      errDiv.style.display = 'block';
+      btn.disabled = false;
+      return;
+    }
+    const data = await res.json();
+    const taskId = data.output.task_id;
+    recentJobs.unshift({ taskId, model, prompt: prompt.substring(0,60), time: new Date().toISOString() });
+    if (recentJobs.length > 20) recentJobs.length = 20;
+    localStorage.setItem('wan_jobs', JSON.stringify(recentJobs));
+    renderJobs();
+    startPolling(taskId);
+  } catch (e) {
+    errDiv.textContent = 'Network error: ' + e.message;
+    errDiv.style.display = 'block';
+    btn.disabled = false;
+  }
+}
+
+function startPolling(taskId) {
+  document.getElementById('submitBtn').disabled = false;
+  document.getElementById('statusSection').style.display = 'block';
+  document.getElementById('taskIdDisplay').textContent = 'Task: ' + taskId;
+  document.getElementById('videoResult').style.display = 'none';
+  updateStatus('PENDING', '');
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('progressFill').className = 'progress-fill';
+
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => pollStatus(taskId), 3000);
+  pollStatus(taskId);
+}
+
+async function pollStatus(taskId) {
+  try {
+    const res = await fetch(`/api/v1/tasks/${taskId}`, {
+      headers: { 'Authorization': 'Bearer ' + getApiKey() },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    updateStatus(data.task_status, data.message);
+
+    if (data.task_status === 'RUNNING') {
+      document.getElementById('progressFill').style.width = '50%';
+    } else if (data.task_status === 'SUCCEEDED') {
+      document.getElementById('progressFill').style.width = '100%';
+      document.getElementById('progressFill').className = 'progress-fill done';
+      clearInterval(pollTimer);
+      showVideo(taskId);
+    } else if (data.task_status === 'FAILED') {
+      document.getElementById('progressFill').style.width = '100%';
+      document.getElementById('progressFill').className = 'progress-fill fail';
+      clearInterval(pollTimer);
+    }
+  } catch (e) {}
+}
+
+function updateStatus(status, message) {
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = status;
+  badge.className = 'status-badge status-' + status;
+  document.getElementById('statusMessage').textContent = message;
+}
+
+function showVideo(taskId) {
+  const url = `/api/v1/files/by-task/${taskId}`;
+  document.getElementById('videoPlayer').src = url;
+  document.getElementById('downloadLink').href = url;
+  document.getElementById('downloadLink').textContent = '⬇ Download Video';
+  document.getElementById('videoResult').style.display = 'block';
+}
+
+function renderJobs() {
+  const list = document.getElementById('jobsList');
+  if (!recentJobs.length) { list.innerHTML = ''; return; }
+  let html = '<div class="card" style="margin-top:20px"><div class="card-title">Recent Jobs</div>';
+  recentJobs.forEach(j => {
+    html += `<div class="jobs-item" onclick="startPolling('${j.taskId}')">
+      <span class="prompt">${j.prompt}</span>
+      <span class="meta">${j.model} · ${new Date(j.time).toLocaleTimeString()}</span>
+    </div>`;
+  });
+  html += '</div>';
+  list.innerHTML = html;
+}
+
+// Init
+document.getElementById('apiKey').value = sessionStorage.getItem('wan_api_key') || '';
+onModelChange();
+renderJobs();
+</script>
+</body>
+</html>

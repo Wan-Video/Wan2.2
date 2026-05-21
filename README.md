@@ -1,507 +1,430 @@
-# Wan2.2
-
-<p align="center">
-    <img src="assets/logo.png" width="400"/>
-<p>
-
-<p align="center">
-    💜 <a href="https://wan.video"><b>Wan</b></a> &nbsp&nbsp ｜ &nbsp&nbsp 🖥️ <a href="https://github.com/Wan-Video/Wan2.2">GitHub</a> &nbsp&nbsp  | &nbsp&nbsp🤗 <a href="https://huggingface.co/Wan-AI/">Hugging Face</a>&nbsp&nbsp | &nbsp&nbsp🤖 <a href="https://modelscope.cn/organization/Wan-AI">ModelScope</a>&nbsp&nbsp | &nbsp&nbsp 📑 <a href="https://arxiv.org/abs/2503.20314">Paper</a> &nbsp&nbsp | &nbsp&nbsp 📑 <a href="https://wan.video/welcome?spm=a2ty_o02.30011076.0.0.6c9ee41eCcluqg">Blog</a> &nbsp&nbsp |  &nbsp&nbsp 💬  <a href="https://discord.gg/AKNgpMK4Yj">Discord</a>&nbsp&nbsp
-    <br>
-    📕 <a href="https://alidocs.dingtalk.com/i/nodes/jb9Y4gmKWrx9eo4dCql9LlbYJGXn6lpz">使用指南(中文)</a>&nbsp&nbsp | &nbsp&nbsp 📘 <a href="https://alidocs.dingtalk.com/i/nodes/EpGBa2Lm8aZxe5myC99MelA2WgN7R35y">User Guide(English)</a>&nbsp&nbsp | &nbsp&nbsp💬 <a href="https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg">WeChat(微信)</a>&nbsp&nbsp
-<br>
-
------
-
-[**Wan: Open and Advanced Large-Scale Video Generative Models**](https://arxiv.org/abs/2503.20314) <be>
-
-
-We are excited to introduce **Wan2.2**, a major upgrade to our foundational video models. With **Wan2.2**, we have focused on incorporating the following innovations:
-
-- 👍 **Effective MoE Architecture**: Wan2.2 introduces a Mixture-of-Experts (MoE) architecture into video diffusion models. By separating the denoising process cross timesteps with specialized powerful expert models, this enlarges the overall model capacity while maintaining the same computational cost.
+# Wan2.2 集群推理与 DashScope 风格 HTTP 服务部署指南
 
-- 👍 **Cinematic-level Aesthetics**: Wan2.2 incorporates meticulously curated aesthetic data, complete with detailed labels for lighting, composition, contrast, color tone, and more. This allows for more precise and controllable cinematic style generation, facilitating the creation of videos with customizable aesthetic preferences.
+本文说明如何在 **2 台 × 4×A100 40GB**（或任意 `nnodes × nproc_per_node = WORLD_SIZE`）上运行本仓库自带的 **异步任务 API**（兼容 DashScope 习惯的 `Bearer` 鉴权、`POST` 提交、`GET` 轮询任务状态）。
 
-- 👍 **Complex Motion Generation**: Compared to Wan2.1, Wan2.2 is trained on a significantly larger data, with +65.6% more images and +83.2% more videos. This expansion notably enhances the model's generalization across multiple dimensions such as motions,  semantics, and aesthetics, achieving TOP performance among all open-sourced and closed-sourced models. 
+---
 
-- 👍 **Efficient High-Definition Hybrid TI2V**:  Wan2.2 open-sources a 5B model built with our advanced Wan2.2-VAE that achieves a compression ratio of **16×16×4**. This model supports both text-to-video and image-to-video generation at 720P resolution with 24fps and can also run on consumer-grade graphics cards like 4090. It is one of the fastest **720P@24fps** models currently available, capable of serving both the industrial and academic sectors simultaneously.
-
+## 1. 架构说明
 
-## Video Demos
-
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/b63bfa58-d5d7-4de6-a1a2-98970b06d9a7" width="70%" poster=""> </video>
-</div>
-
-## 🔥 Latest News!!
-* Nov 13, 2025: 👋 Wan2.2-Animate-14B has been integrated into Diffusers ([PR](https://github.com/huggingface/diffusers/pull/12526),[Weights](https://huggingface.co/Wan-AI/Wan2.2-Animate-14B-Diffusers)). Thanks to all community contributors. Enjoy!
+| 组件 | 职责 |
+|------|------|
+| **Redis** | 任务队列 `WAN_QUEUE_NAME`、任务元数据 `WAN_TASK_KEY_PREFIX*`、集群互斥锁 `WAN_CLUSTER_LOCK_KEY`（同一时刻只跑一个 `torchrun` 作业）。 |
+| **`run_api_server.py` + `serve.api`** | FastAPI：提交任务、查询状态、下载 MP4。 |
+| **`python -m serve.worker_main`** | 从队列取 `task_id`，写 `job.json`，调用 `torchrun … generate_job.py`。 |
+| **`generate_job.py`** | 读取 JSON，调用 `generate.args_from_job_dict` + `generate.generate`。 |
 
-* Sep 19, 2025: 💃 We introduct **[Wan2.2-Animate-14B](https://humanaigc.github.io/wan-animate)**, an unified model for character animation and replacement with holistic movement and expression replication. We released the [model weights](#model-download) and [inference code](#run-wan-animate). And you can try it on [wan.video](https://wan.video/), [ModelScope Studio](https://www.modelscope.cn/studios/Wan-AI/Wan2.2-Animate) or [HuggingFace Space](https://huggingface.co/spaces/Wan-AI/Wan2.2-Animate)!
-* Aug 26, 2025: 🎵 We introduce **[Wan2.2-S2V-14B](https://humanaigc.github.io/wan-s2v-webpage)**, an audio-driven cinematic video generation model, including [inference code](#run-speech-to-video-generation), [model weights](#model-download), and [technical report](https://humanaigc.github.io/wan-s2v-webpage/content/wan-s2v.pdf)! Now you can try it on [wan.video](https://wan.video/),  [ModelScope Gradio](https://www.modelscope.cn/studios/Wan-AI/Wan2.2-S2V) or [HuggingFace Gradio](https://huggingface.co/spaces/Wan-AI/Wan2.2-S2V)!
-* Jul 28, 2025: 👋 We have open a [HF space](https://huggingface.co/spaces/Wan-AI/Wan-2.2-5B) using the TI2V-5B model. Enjoy!
-* Jul 28, 2025: 👋 Wan2.2 has been integrated into ComfyUI ([CN](https://docs.comfy.org/zh-CN/tutorials/video/wan/wan2_2) | [EN](https://docs.comfy.org/tutorials/video/wan/wan2_2)). Enjoy!
-* Jul 28, 2025: 👋 Wan2.2's T2V, I2V and TI2V have been integrated into Diffusers ([T2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B-Diffusers) | [I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | [TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers)). Feel free to give it a try!
-* Jul 28, 2025: 👋 We've released the inference code and model weights of **Wan2.2**.
-* Sep 5, 2025: 👋 We add text-to-speech synthesis support with [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) for Speech-to-Video generation task.
+**重要**：默认实现假设 **只有一个 worker 进程** 在消费队列（全局 GPU 锁）。若启动多个 worker 会抢锁并反复 requeue；多任务并发需改造为每套 GPU 独立队列或 Kubernetes Job。
 
+---
 
-## Community Works
-If your research or project builds upon [**Wan2.1**](https://github.com/Wan-Video/Wan2.1) or [**Wan2.2**](https://github.com/Wan-Video/Wan2.2), and you would like more people to see it, please inform us.
+## 2. 环境准备（两台 GPU 机 + 一台 API 机可选）
 
-- [Prompt Relay](https://github.com/GordonChen19/Prompt-Relay), a plug-and-play, inference-time method for temporal control in video generation. Prompt Relay improves video quality and gives users precise control over what happens at each moment in the video. Visit their [webpage](https://gordonchen19.github.io/Prompt-Relay/) for more details.
-- [Helios](https://github.com/PKU-YuanGroup/Helios), a breakthrough video generation model base on **Wan2.1** that achieves minute-scale, high-quality video synthesis at 19.5 FPS on a single H100 GPU (about 10 FPS on a single Ascend NPU) —without relying on conventional long video anti-drifting strategies or standard video acceleration techniques. Visit their [webpage](https://pku-yuangroup.github.io/Helios-Page/) for more details.
-- [LightX2V](https://github.com/ModelTC/LightX2V), a lightweight and efficient video generation framework that integrates **Wan2.1** and **Wan2.2**, supporting multiple engineering acceleration techniques for fast inference. [LightX2V-HuggingFace](https://huggingface.co/lightx2v), offers a variety of Wan-based step-distillation models, quantized models, and lightweight VAE models.
-- [HuMo](https://github.com/Phantom-video/HuMo) proposed a unified, human-centric framework based on **Wan** to produce high-quality, fine-grained, and controllable human videos from multimodal inputs—including text, images, and audio. Visit their [webpage](https://phantom-video.github.io/HuMo/) for more details.
-- [FastVideo](https://github.com/hao-ai-lab/FastVideo) includes distilled **Wan** models with sparse attention that significanly speed up the inference time. 
-- [Cache-dit](https://github.com/vipshop/cache-dit) offers Fully Cache Acceleration support for **Wan2.2** MoE with DBCache, TaylorSeer and Cache CFG. Visit their [example](https://github.com/vipshop/cache-dit/blob/main/examples/pipeline/run_wan_2.2.py) for more details.
-- [Kijai's ComfyUI WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) is an alternative implementation of **Wan** models for ComfyUI. Thanks to its Wan-only focus, it's on the frontline of getting cutting edge optimizations and hot research features, which are often hard to integrate into ComfyUI quickly due to its more rigid structure.
-- [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) provides comprehensive support for **Wan 2.2**, including low-GPU-memory layer-by-layer offload, FP8 quantization, sequence parallelism, LoRA training, full training.
+1. **Python**：与官方 README 一致，`torch>=2.4`，安装 `requirements.txt` + 推理所需依赖。  
+2. **服务依赖**（跑 API / worker 的机器）：  
+   ```bash
+   pip install -r requirements_serve.txt
+   ```  
+3. **Redis**：可部署在 API 同机或独立 VM；两台 GPU 机与 API 均需能访问该地址。  
+4. **共享存储（强烈推荐）**：NFS 等，两台 GPU 上 **相同绝对路径** 挂载：  
+   - 模型目录 `WAN_CKPT_DIR`  
+   - 任务 JSON 目录 `WAN_JOB_DIR`  
+   - 输出视频目录 `WAN_OUTPUT_DIR`  
 
+5. **NCCL 双机**：设置 `NCCL_SOCKET_IFNAME`、主机名解析、防火墙放行 `WAN_MASTER_PORT` 及 PyTorch 分布式端口；有 RDMA 时按机房文档配置 IB。
 
-## 📑 Todo List
-- Wan2.2 Text-to-Video
-    - [x] Multi-GPU Inference code of the A14B and 14B models
-    - [x] Checkpoints of the A14B and 14B models
-    - [x] ComfyUI integration
-    - [x] Diffusers integration
-- Wan2.2 Image-to-Video
-    - [x] Multi-GPU Inference code of the A14B model
-    - [x] Checkpoints of the A14B model
-    - [x] ComfyUI integration
-    - [x] Diffusers integration
-- Wan2.2 Text-Image-to-Video
-    - [x] Multi-GPU Inference code of the 5B model
-    - [x] Checkpoints of the 5B model
-    - [x] ComfyUI integration
-    - [x] Diffusers integration
-- Wan2.2-S2V Speech-to-Video
-    - [x] Inference code of Wan2.2-S2V
-    - [x] Checkpoints of Wan2.2-S2V-14B
-    - [x] ComfyUI integration
-    - [x] Diffusers integration
-- Wan2.2-Animate Character Animation and Replacement
-    - [x] Inference code of Wan2.2-Animate
-    - [x] Checkpoints of Wan2.2-Animate
-    - [x] ComfyUI integration
-    - [x] Diffusers integration
+---
 
-## Run Wan2.2
+## 3. 环境变量参考
 
-#### Installation
-Clone the repo:
-```sh
-git clone https://github.com/Wan-Video/Wan2.2.git
-cd Wan2.2
-```
+### 通用 / API / Worker
 
-Install dependencies:
-```sh
-# Ensure torch >= 2.4.0
-# If the installation of `flash_attn` fails, try installing the other packages first and install `flash_attn` last
-pip install -r requirements.txt
-# If you want to use CosyVoice to synthesize speech for Speech-to-Video Generation, please install requirements_s2v.txt additionally
-pip install -r requirements_s2v.txt
-```
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `WAN_SERVE_API_KEYS` | 逗号分隔的 API Key（`Authorization: Bearer <key>`） | `sk-local-xxx,sk-local-yyy` |
+| `WAN_REDIS_URL` | Redis 连接串 | `redis://10.0.0.5:6379/0` |
+| `WAN_REPO_ROOT` | 本仓库绝对路径 | `/data/Wan2.2` |
+| `WAN_JOB_DIR` | 任务 JSON 目录（需共享） | `/mnt/wan/jobs` |
+| `WAN_OUTPUT_DIR` | 输出 MP4（需共享） | `/mnt/wan/out` |
+| `WAN_CKPT_DIR` | 默认 checkpoint 根目录 | `/mnt/wan/Wan2.2-T2V-A14B` |
 
+### 多机 torchrun（Worker 所在机应能 `ssh` 到第二台时）
 
-#### Model Download
+| 变量 | 说明 |
+|------|------|
+| `WAN_NNODES` | 节点数，例如 `2` |
+| `WAN_NPROC_PER_NODE` | 每节点进程数，例如 `4`（总 8 卡） |
+| `WAN_MASTER_ADDR` | rank0 所在机 IP（**第一**台 GPU 机） |
+| `WAN_MASTER_PORT` | rendezvous 端口，如 `29500` |
+| `WAN_RDZV_PREFIX` | rendezvous id 前缀（会再拼 `task_id`） |
+| `WAN_SSH_SECOND_NODE` | 第二台登录串，如 `ubuntu@192.168.1.12` |
+| `WAN_SSH_TORCHRUN_PREFIX` | SSH 远端 shell 前缀，默认 `cd {repo_root} && export PYTHONPATH={repo_root}:$PYTHONPATH && ` |
+| `WAN_PYTHON` / `WAN_TORCHRUN` | 可选，覆盖可执行文件路径 |
 
-| Models              | Download Links                                                                                                                              | Description |
-|--------------------|---------------------------------------------------------------------------------------------------------------------------------------------|-------------|
-| T2V-A14B    | 🤗 [Huggingface](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B)    🤖 [ModelScope](https://modelscope.cn/models/Wan-AI/Wan2.2-T2V-A14B)    | Text-to-Video MoE model, supports 480P & 720P |
-| I2V-A14B    | 🤗 [Huggingface](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B)    🤖 [ModelScope](https://modelscope.cn/models/Wan-AI/Wan2.2-I2V-A14B)    | Image-to-Video MoE model, supports 480P & 720P |
-| TI2V-5B     | 🤗 [Huggingface](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)     🤖 [ModelScope](https://modelscope.cn/models/Wan-AI/Wan2.2-TI2V-5B)     | High-compression VAE, T2V+I2V, supports 720P |
-| S2V-14B     | 🤗 [Huggingface](https://huggingface.co/Wan-AI/Wan2.2-S2V-14B)     🤖 [ModelScope](https://modelscope.cn/models/Wan-AI/Wan2.2-S2V-14B)     | Speech-to-Video model, supports 480P & 720P |
-| Animate-14B | 🤗 [Huggingface](https://huggingface.co/Wan-AI/Wan2.2-Animate-14B) 🤖 [ModelScope](https://www.modelscope.cn/models/Wan-AI/Wan2.2-Animate-14B)  | Character animation and replacement | |
+### Prompt 扩展（可选）
 
+若任务 JSON 里 `use_prompt_extend=true` 且 `prompt_extend_method=dashscope`：
 
+- `DASH_API_KEY`  
+- 国际站可设 `DASH_API_URL=https://dashscope-intl.aliyuncs.com/api/v1`
 
-> 💡Note: 
-> The TI2V-5B model supports 720P video generation at **24 FPS**.
+---
 
-
-Download models using huggingface-cli:
-``` sh
-pip install "huggingface_hub[cli]"
-huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir ./Wan2.2-T2V-A14B
-```
-
-Download models using modelscope-cli:
-``` sh
-pip install modelscope
-modelscope download Wan-AI/Wan2.2-T2V-A14B --local_dir ./Wan2.2-T2V-A14B
-```
-
-#### Run Text-to-Video Generation
-
-This repository supports the `Wan2.2-T2V-A14B` Text-to-Video model and can simultaneously support video generation at 480P and 720P resolutions.
-
-
-##### (1) Without Prompt Extension
-
-To facilitate implementation, we will start with a basic version of the inference process that skips the [prompt extension](#2-using-prompt-extention) step.
-
-- Single-GPU inference
-
-``` sh
-python generate.py  --task t2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-T2V-A14B --offload_model True --convert_model_dtype --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-```
-
-> 💡 This command can run on a GPU with at least 80GB VRAM.
-
-> 💡If you encounter OOM (Out-of-Memory) issues, you can use the `--offload_model True`, `--convert_model_dtype` and `--t5_cpu` options to reduce GPU memory usage.
-
-
-- Multi-GPU inference using FSDP + DeepSpeed Ulysses
-
-  We use [PyTorch FSDP](https://docs.pytorch.org/docs/stable/fsdp.html) and [DeepSpeed Ulysses](https://arxiv.org/abs/2309.14509) to accelerate inference.
-
-
-``` sh
-torchrun --nproc_per_node=8 generate.py --task t2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-T2V-A14B --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-```
-
-
-##### (2) Using Prompt Extension
-
-Extending the prompts can effectively enrich the details in the generated videos, further enhancing the video quality. Therefore, we recommend enabling prompt extension. We provide the following two methods for prompt extension:
-
-- Use the Dashscope API for extension.
-  - Apply for a `dashscope.api_key` in advance ([EN](https://www.alibabacloud.com/help/en/model-studio/getting-started/first-api-call-to-qwen) | [CN](https://help.aliyun.com/zh/model-studio/getting-started/first-api-call-to-qwen)).
-  - Configure the environment variable `DASH_API_KEY` to specify the Dashscope API key. For users of Alibaba Cloud's international site, you also need to set the environment variable `DASH_API_URL` to 'https://dashscope-intl.aliyuncs.com/api/v1'. For more detailed instructions, please refer to the [dashscope document](https://www.alibabacloud.com/help/en/model-studio/developer-reference/use-qwen-by-calling-api?spm=a2c63.p38356.0.i1).
-  - Use the `qwen-plus` model for text-to-video tasks and `qwen-vl-max` for image-to-video tasks.
-  - You can modify the model used for extension with the parameter `--prompt_extend_model`. For example:
-```sh
-DASH_API_KEY=your_key torchrun --nproc_per_node=8 generate.py  --task t2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-T2V-A14B --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" --use_prompt_extend --prompt_extend_method 'dashscope' --prompt_extend_target_lang 'zh'
-```
-
-- Using a local model for extension.
-
-  - By default, the Qwen model on HuggingFace is used for this extension. Users can choose Qwen models or other models based on the available GPU memory size.
-  - For text-to-video tasks, you can use models like `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-7B-Instruct` and `Qwen/Qwen2.5-3B-Instruct`.
-  - For image-to-video tasks, you can use models like `Qwen/Qwen2.5-VL-7B-Instruct` and `Qwen/Qwen2.5-VL-3B-Instruct`.
-  - Larger models generally provide better extension results but require more GPU memory.
-  - You can modify the model used for extension with the parameter `--prompt_extend_model` , allowing you to specify either a local model path or a Hugging Face model. For example:
-
-``` sh
-torchrun --nproc_per_node=8 generate.py  --task t2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-T2V-A14B --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" --use_prompt_extend --prompt_extend_method 'local_qwen' --prompt_extend_target_lang 'zh'
-```
-
-
-#### Run Image-to-Video Generation
-
-This repository supports the `Wan2.2-I2V-A14B` Image-to-Video model and can simultaneously support video generation at 480P and 720P resolutions.
-
-
-- Single-GPU inference
-```sh
-python generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --offload_model True --convert_model_dtype --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
-```
-
-> This command can run on a GPU with at least 80GB VRAM.
-
-> 💡For the Image-to-Video task, the `size` parameter represents the area of the generated video, with the aspect ratio following that of the original input image.
-
-
-- Multi-GPU inference using FSDP + DeepSpeed Ulysses
-
-```sh
-torchrun --nproc_per_node=8 generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --image examples/i2v_input.JPG --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
-```
-
-- Image-to-Video Generation without prompt
-
-```sh
-DASH_API_KEY=your_key torchrun --nproc_per_node=8 generate.py --task i2v-A14B --size 1280*720 --ckpt_dir ./Wan2.2-I2V-A14B --prompt '' --image examples/i2v_input.JPG --dit_fsdp --t5_fsdp --ulysses_size 8 --use_prompt_extend --prompt_extend_method 'dashscope'
-```
-
-> 💡The model can generate videos solely from the input image. You can use prompt extension to generate prompt from the image.
-
-> The process of prompt extension can be referenced [here](#2-using-prompt-extention).
-
-#### Run Text-Image-to-Video Generation
-
-This repository supports the `Wan2.2-TI2V-5B` Text-Image-to-Video model and can support video generation at 720P resolutions.
-
-
-- Single-GPU Text-to-Video inference
-```sh
-python generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --offload_model True --convert_model_dtype --t5_cpu --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage"
-```
-
-> 💡Unlike other tasks, the 720P resolution of the Text-Image-to-Video task is `1280*704` or `704*1280`.
-
-> This command can run on a GPU with at least 24GB VRAM (e.g, RTX 4090 GPU).
-
-> 💡If you are running on a GPU with at least 80GB VRAM, you can remove the `--offload_model True`, `--convert_model_dtype` and `--t5_cpu` options to speed up execution.
-
-
-- Single-GPU Image-to-Video inference
-```sh
-python generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --offload_model True --convert_model_dtype --t5_cpu --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
-```
-
-> 💡If the image parameter is configured, it is an Image-to-Video generation; otherwise, it defaults to a Text-to-Video generation.
-
-> 💡Similar to Image-to-Video, the `size` parameter represents the area of the generated video, with the aspect ratio following that of the original input image.
-
-
-- Multi-GPU inference using FSDP + DeepSpeed Ulysses
-
-```sh
-torchrun --nproc_per_node=8 generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --dit_fsdp --t5_fsdp --ulysses_size 8 --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
-```
-
-> The process of prompt extension can be referenced [here](#2-using-prompt-extention).
-
-#### Run Speech-to-Video Generation
-
-This repository supports the `Wan2.2-S2V-14B` Speech-to-Video model and can simultaneously support video generation at 480P and 720P resolutions.
-
-- Single-GPU Speech-to-Video inference
-
-```sh
-python generate.py  --task s2v-14B --size 1024*704 --ckpt_dir ./Wan2.2-S2V-14B/ --offload_model True --convert_model_dtype --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard."  --image "examples/i2v_input.JPG" --audio "examples/talk.wav"
-# Without setting --num_clip, the generated video length will automatically adjust based on the input audio length
-
-# You can use CosyVoice to generate audio with --enable_tts
-python generate.py  --task s2v-14B --size 1024*704 --ckpt_dir ./Wan2.2-S2V-14B/ --offload_model True --convert_model_dtype --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard."  --image "examples/i2v_input.JPG" --enable_tts --tts_prompt_audio "examples/zero_shot_prompt.wav" --tts_prompt_text "希望你以后能够做的比我还好呦。" --tts_text "收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。"
-```
-
-> 💡 This command can run on a GPU with at least 80GB VRAM.
-
-- Multi-GPU inference using FSDP + DeepSpeed Ulysses
-
-```sh
-torchrun --nproc_per_node=8 generate.py --task s2v-14B --size 1024*704 --ckpt_dir ./Wan2.2-S2V-14B/ --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard." --image "examples/i2v_input.JPG" --audio "examples/talk.wav"
-```
-
-- Pose + Audio driven generation
-
-```sh
-torchrun --nproc_per_node=8 generate.py --task s2v-14B --size 1024*704 --ckpt_dir ./Wan2.2-S2V-14B/ --dit_fsdp --t5_fsdp --ulysses_size 8 --prompt "a person is singing" --image "examples/pose.png" --audio "examples/sing.MP3" --pose_video "./examples/pose.mp4" 
-```
-
-> 💡For the Speech-to-Video task, the `size` parameter represents the area of the generated video, with the aspect ratio following that of the original input image.
-
-> 💡The model can generate videos from audio input combined with reference image and optional text prompt.
-
-> 💡The `--pose_video` parameter enables pose-driven generation, allowing the model to follow specific pose sequences while generating videos synchronized with audio input.
-
-> 💡The `--num_clip` parameter controls the number of video clips generated, useful for quick preview with shorter generation time.
-
-Please visit our project page to see more examples and learn about the scenarios suitable for this model.
-
-#### Run Wan-Animate 
-
-Wan-Animate takes a video and a character image as input, and generates a video in either "animation" or "replacement" mode. 
-
-1. animation mode： The model generates a video of the character image that mimics the human motion in the input video.
-2. replacement mode: The model replaces the character image with the input video.
-
-Please visit our [project page](https://humanaigc.github.io/wan-animate) to see more examples and learn about the scenarios suitable for this model.
-
-##### (1) Preprocessing 
-The input video should be preprocessed into several materials before be feed into the inference process.  Please refer to the following processing flow, and more details about preprocessing can be found in [UserGuider](https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/animate/preprocess/UserGuider.md).
-
-* For animation
-```bash
-python ./wan/modules/animate/preprocess/preprocess_data.py \
-    --ckpt_path ./Wan2.2-Animate-14B/process_checkpoint \
-    --video_path ./examples/wan_animate/animate/video.mp4 \
-    --refer_path ./examples/wan_animate/animate/image.jpeg \
-    --save_path ./examples/wan_animate/animate/process_results \
-    --resolution_area 1280 720 \
-    --retarget_flag \
-    --use_flux
-```
-* For replacement
-```bash
-python ./wan/modules/animate/preprocess/preprocess_data.py \
-    --ckpt_path ./Wan2.2-Animate-14B/process_checkpoint \
-    --video_path ./examples/wan_animate/replace/video.mp4 \
-    --refer_path ./examples/wan_animate/replace/image.jpeg \
-    --save_path ./examples/wan_animate/replace/process_results \
-    --resolution_area 1280 720 \
-    --iterations 3 \
-    --k 7 \
-    --w_len 1 \
-    --h_len 1 \
-    --replace_flag
-```
-##### (2) Run in animation mode 
-
-* Single-GPU inference 
+## 4. 单机 8 卡（单节点测试）
 
 ```bash
-python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/animate/process_results/ --refert_num 1
+export WAN_SERVE_API_KEYS="sk-dev"
+export WAN_REDIS_URL="redis://127.0.0.1:6379/0"
+export WAN_REPO_ROOT="/data/Wan2.2"
+export WAN_CKPT_DIR="/data/Wan2.2-T2V-A14B"
+export WAN_JOB_DIR="/tmp/wan_jobs"
+export WAN_OUTPUT_DIR="/tmp/wan_out"
+export WAN_NNODES=1
+export WAN_NPROC_PER_NODE=8
+export PYTHONPATH="/data/Wan2.2:$PYTHONPATH"
+
+# 终端 1
+redis-server &
+python run_api_server.py
+
+# 终端 2（与 API 同机或能访问 Redis 的 GPU 机）
+python -m serve.worker_main
 ```
 
-* Multi-GPU inference using FSDP + DeepSpeed Ulysses
+提交示例：
 
 ```bash
-python -m torch.distributed.run --nnodes 1 --nproc_per_node 8 generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/animate/process_results/ --refert_num 1 --dit_fsdp --t5_fsdp --ulysses_size 8
+curl -sS -X POST "http://127.0.0.1:8008/api/v1/video/generation" \
+  -H "Authorization: Bearer sk-dev" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "wan2.2-t2v-a14b",
+    "input": { "prompt": "A cat walking on grass." },
+    "parameters": {
+      "size": "1280*720",
+      "dit_fsdp": true,
+      "t5_fsdp": true,
+      "ulysses_size": 8,
+      "offload_model": false,
+      "convert_model_dtype": true
+    }
+  }'
 ```
 
-* Diffusers Pipeline
-
-```python
-from diffusers import WanAnimatePipeline
-from diffusers.utils import export_to_video, load_image, load_video
-
-device = "cuda:0"
-dtype = torch.bfloat16
-model_id = "Wan-AI/Wan2.2-Animate-14B-Diffusers"
-pipe = WanAnimatePipeline.from_pretrained(model_id torch_dtype=dtype)
-pipe.to(device)
-
-seed = 42
-prompt = "People in the video are doing actions."
-
-# Animation
-image = load_image("/path/to/animate/reference/image/src_ref.png")
-pose_video = load_video("/path/to/animate/pose/video/src_pose.mp4")
-face_video = load_video("/path/to/animate/face/video/src_face.mp4")
-
-animate_video = pipe(
-    image=image,
-    pose_video=pose_video,
-    face_video=face_video,
-    prompt=prompt,
-    mode="animate",
-    segment_frame_length=77,  # clip_len in original code
-    prev_segment_conditioning_frames=1,  # refert_num in original code
-    guidance_scale=1.0,
-    num_inference_steps=20,
-    generator=torch.Generator(device=device).manual_seed(seed),
-).frames[0]
-export_to_video(animate_video, "diffusers_animate.mp4", fps=30)
-```
-
-##### (3) Run in replacement mode 
-
-* Single-GPU inference 
+查询与下载（将 `TASK_ID` 换成响应里的 `task_id`）：
 
 ```bash
-python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/replace/process_results/ --refert_num 1 --replace_flag --use_relighting_lora 
+curl -sS -H "Authorization: Bearer sk-dev" \
+  "http://127.0.0.1:8008/api/v1/tasks/TASK_ID"
+
+curl -L -o out.mp4 -H "Authorization: Bearer sk-dev" \
+  "http://127.0.0.1:8008/api/v1/files/by-task/TASK_ID"
 ```
 
-* Multi-GPU inference using FSDP + DeepSpeed Ulysses
+---
+
+## 5. 双机 2×4 卡 A100（推荐生产形态）
+
+下文假设 **GPU 节点 0**（主节点，跑 Worker + 本地 `torchrun`）与 **GPU 节点 1**（从节点，仅通过 SSH 被拉起 `torchrun`）各 **4×A100 40GB**，合计 **8 卡** 跑 `t2v-A14B` / `i2v-A14B` 等需 `WORLD_SIZE=8` 且 `ulysses_size=8` 的任务。`serve/launcher.py` 在 `WAN_NNODES>1` 时会在 **节点 0 本机** 启动 `torchrun`，并通过 **SSH** 在 **节点 1** 启动 **完全相同** 的一条 `torchrun` 命令，由 PyTorch **c10d rendezvous** 完成组网。
+
+### 5.1 拓扑与角色
+
+| 角色 | 建议部署位置 | 说明 |
+|------|----------------|------|
+| **Redis** | 第三台小规格机器、或节点 0、或托管云服务 | API 与 Worker 均需 `WAN_REDIS_URL` 可达。 |
+| **HTTP API** | 任意能访问 Redis 的机器（可无 GPU） | `run_api_server.py`，对客户端暴露 `8008`。 |
+| **GPU Worker** | **仅节点 0 上跑一个进程** | `python -m serve.worker_main`；默认全局 GPU 锁，不要双机各起一个 Worker 消费同一队列。 |
+| **推理进程** | 节点 0：本地 `torchrun`；节点 1：经 SSH 启动的 `torchrun` | 两机 `torchrun` 参数一致，`--rdzv_endpoint` 指向 **节点 0 可达 IP**。 |
+
+### 5.2 网络与主机名
+
+1. 为两机分配固定内网 IP，例如：节点 0 → `10.0.0.10`，节点 1 → `10.0.0.11`。  
+2. `WAN_MASTER_ADDR` 必须填 **节点 0 上对节点 1 可达的 IP**（通常即 `10.0.0.10`），**不要**填 `127.0.0.1`。  
+3. 开放防火墙：**`WAN_MASTER_PORT`（如 29500）** 以及 PyTorch/NCCL 可能使用的端口段（或先临时放宽双机间 TCP 以便联调）。  
+4. 若跨机 RDMA，按机房规范配置 IB；仅用 TCP 时可先设 `export NCCL_IB_DISABLE=1` 排除 IB 干扰（性能会下降，仅用于排障）。
+
+### 5.3 共享存储（NFS 或并行文件系统）
+
+两机对以下路径使用 **同一挂载点、同一绝对路径**（示例均为 `/mnt/wan/...`，可按机房替换）：
+
+| 路径 | 用途 |
+|------|------|
+| `WAN_REPO_ROOT`（如 `/mnt/wan/Wan2.2`） | 本仓库代码，两机一致。 |
+| `WAN_CKPT_DIR`（如 `/mnt/wan/Wan2.2-T2V-A14B`） | 模型权重只读；Worker 内常为 `/ckpt`，宿主机挂载需与 `WAN_CKPT_DIR` 一致。 |
+| `WAN_JOB_DIR` | 任务 JSON；Worker 写入，`job_json` 为 NFS 路径以便两机 `torchrun` 同读。 |
+| `WAN_OUTPUT_DIR` | 生成 MP4；仅 rank 0 写盘，放 NFS 便于 API 机或节点 0 取文件。 |
+
+挂载后分别在两机执行：`ls -la $WAN_REPO_ROOT/generate_job.py` 与 `ls $WAN_CKPT_DIR`，确认路径一致、权限可读。
+
+### 5.4 软件环境（两机必须对齐）
+
+1. **操作系统与驱动**：两机安装同一主线版本 **NVIDIA 驱动**，`nvidia-smi` 正常。  
+2. **Python**：建议 **同版本**（如 3.10/3.11），各自 `venv` 或 **同一套 Conda env** 的克隆亦可，关键是 **`torch` 版本与 CUDA 构建一致**。  
+3. **依赖**：两机均在 `WAN_REPO_ROOT` 下执行 `pip install -r requirements.txt` 与 `pip install -r requirements_serve.txt`（`flash_attn` 若装不上可先跳过，与单机排障相同）。  
+4. **`torchrun` 在 PATH 中**：`which torchrun` 两机均有结果。  
+
+节点 1 **不跑** `serve.worker_main`，但必须能通过 SSH 执行与节点 0 **相同**的 `torchrun … generate_job.py`，因此节点 1 也需完整 Python 环境与仓库代码（与节点 0 同一路径最省事）。
+
+### 5.5 节点 0 → 节点 1 免密 SSH
+
+在 **节点 0** 上（以运行 Worker 的 Linux 用户执行）：
 
 ```bash
-python -m torch.distributed.run --nnodes 1 --nproc_per_node 8 generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/replace/process_results/src_pose.mp4  --refert_num 1 --replace_flag --use_relighting_lora --dit_fsdp --t5_fsdp --ulysses_size 8
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519_wan -C "wan-worker"
+# 将公钥追加到节点 1 的 authorized_keys（把 user、10.0.0.11 换成实际值）
+ssh-copy-id -i ~/.ssh/id_ed25519_wan.pub user@10.0.0.11
+# 若使用自定义 key：
+ssh -i ~/.ssh/id_ed25519_wan user@10.0.0.11 'hostname'
 ```
 
-* Diffusers Pipeline
+`WAN_SSH_SECOND_NODE` 建议写成 **`user@10.0.0.11`**，与上述 `ssh` 登录串一致。  
+生产环境建议在 `serve/launcher.py` 中为 `ssh` 增加 `KnownHostsFile` / 关闭 `StrictHostKeyChecking=no`，避免中间人风险。
 
-```python
-# create pipeline as in the Animation code ☝️
+### 5.6 NCCL 与常见环境变量（两机 Worker 进程继承；SSH 子进程同理）
 
-# Replacement
-image = load_image("/path/to/replace/reference/image/src_ref.png")
-pose_video = load_video("/path/to/replace/pose/video/src_pose.mp4")
-face_video = load_video("/path/to/replace/face/video/src_face.mp4")
-background_video = load_video("/path/to/replace/background/video/src_bg.mp4")
-mask_video = load_video("/path/to/replace/mask/video/src_mask.mp4")
+在 **节点 0** 启动 Worker 的 shell 或 systemd 中可导出（按网卡名修改）：
 
-replace_video = pipe(
-    image=image,
-    pose_video=pose_video,
-    face_video=face_video,
-    background_video=background_video,
-    mask_video=mask_video,
-    prompt=prompt,
-    mode="replace",
-    segment_frame_length=77,  # clip_len in original code
-    prev_segment_conditioning_frames=1,  # refert_num in original code
-    guidance_scale=1.0,
-    num_inference_steps=20,
-    generator=torch.Generator(device=device).manual_seed(seed),
-).frames[0]
-export_to_video(replace_video, "diffusers_replace.mp4", fps=30)
+```bash
+export NCCL_SOCKET_IFNAME=eth0      # 或 ens、bond0 等，双机互通的网卡
+export NCCL_DEBUG=WARN              # 排障时可改为 INFO
+# export NCCL_IB_DISABLE=1          # 无 IB 或联调时可开
 ```
 
-> 💡 If you're using **Wan-Animate**, we do not recommend using LoRA models trained on `Wan2.2`, since weight changes during training may lead to unexpected behavior.
+### 5.7 双机专用环境变量（节点 0 上配置）
 
-## Computational Efficiency on Different GPUs
+以下变量在 **跑 `python -m serve.worker_main` 的节点 0** 上设置（可写入 `/etc/default/wan-worker` 或 systemd `Environment=`）：
 
-We test the computational efficiency of different **Wan2.2** models on different GPUs in the following table. The results are presented in the format: **Total time (s) / peak GPU memory (GB)**.
+```bash
+export WAN_NNODES=2
+export WAN_NPROC_PER_NODE=4
+export WAN_MASTER_ADDR=10.0.0.10       # 节点 0 对外的内网 IP
+export WAN_MASTER_PORT=29500
+export WAN_SSH_SECOND_NODE=user@10.0.0.11
 
+export WAN_REPO_ROOT=/mnt/wan/Wan2.2
+export PYTHONPATH=/mnt/wan/Wan2.2:$PYTHONPATH
+export WAN_CKPT_DIR=/mnt/wan/Wan2.2-T2V-A14B
+export WAN_JOB_DIR=/mnt/wan/jobs
+export WAN_OUTPUT_DIR=/mnt/wan/out
 
-<div align="center">
-    <img src="assets/comp_effic.png" alt="" style="width: 80%;" />
-</div>
+export WAN_REDIS_URL=redis://10.0.0.5:6379/0
+export WAN_SERVE_API_KEYS=sk-your-secret
 
-> The parameter settings for the tests presented in this table are as follows:
-> (1) Multi-GPU: 14B: `--ulysses_size 4/8 --dit_fsdp --t5_fsdp`, 5B: `--ulysses_size 4/8 --offload_model True --convert_model_dtype --t5_cpu`; Single-GPU: 14B: `--offload_model True --convert_model_dtype`, 5B: `--offload_model True --convert_model_dtype --t5_cpu`
-(--convert_model_dtype converts model parameter types to config.param_dtype);
-> (2) The distributed testing utilizes the built-in FSDP and Ulysses implementations, with FlashAttention3 deployed on Hopper architecture GPUs;
-> (3) Tests were run without the `--use_prompt_extend` flag;
-> (4) Reported results are the average of multiple samples taken after the warm-up phase.
-
-
--------
-
-## Introduction of Wan2.2
-
-**Wan2.2** builds on the foundation of Wan2.1 with notable improvements in generation quality and model capability. This upgrade is driven by a series of key technical innovations, mainly including the Mixture-of-Experts (MoE) architecture, upgraded training data, and high-compression video generation.
-
-##### (1) Mixture-of-Experts (MoE) Architecture
-
-Wan2.2 introduces Mixture-of-Experts (MoE) architecture into the video generation diffusion model. MoE has been widely validated in large language models as an efficient approach to increase total model parameters while keeping inference cost nearly unchanged. In Wan2.2, the A14B model series adopts a two-expert design tailored to the denoising process of diffusion models: a high-noise expert for the early stages, focusing on overall layout; and a low-noise expert for the later stages, refining video details. Each expert model has about 14B parameters, resulting in a total of 27B parameters but only 14B active parameters per step, keeping inference computation and GPU memory nearly unchanged.
-
-<div align="center">
-    <img src="assets/moe_arch.png" alt="" style="width: 90%;" />
-</div>
-
-The transition point between the two experts is determined by the signal-to-noise ratio (SNR), a metric that decreases monotonically as the denoising step $t$ increases. At the beginning of the denoising process, $t$ is large and the noise level is high, so the SNR is at its minimum, denoted as ${SNR}_{min}$. In this stage, the high-noise expert is activated. We define a threshold step ${t}_{moe}$ corresponding to half of the ${SNR}_{min}$, and switch to the low-noise expert when $t<{t}_{moe}$.
-
-<div align="center">
-    <img src="assets/moe_2.png" alt="" style="width: 90%;" />
-</div>
-
-To validate the effectiveness of the MoE architecture, four settings are compared based on their validation loss curves. The baseline **Wan2.1** model does not employ the MoE architecture. Among the MoE-based variants, the **Wan2.1 & High-Noise Expert** reuses the Wan2.1 model as the low-noise expert while uses the  Wan2.2's high-noise expert, while the **Wan2.1 & Low-Noise Expert** uses Wan2.1 as the high-noise expert and employ the Wan2.2's low-noise expert. The **Wan2.2 (MoE)** (our final version) achieves the lowest validation loss, indicating that its generated video distribution is closest to ground-truth and exhibits superior convergence.
-
-
-##### (2) Efficient High-Definition Hybrid TI2V
-To enable more efficient deployment, Wan2.2 also explores a high-compression design. In addition to the 27B MoE models, a 5B dense model, i.e., TI2V-5B, is released. It is supported by a high-compression Wan2.2-VAE, which achieves a $T\times H\times W$ compression ratio of $4\times16\times16$, increasing the overall compression rate to 64 while maintaining high-quality video reconstruction. With an additional patchification layer, the total compression ratio of TI2V-5B reaches $4\times32\times32$. Without specific optimization, TI2V-5B can generate a 5-second 720P video in under 9 minutes on a single consumer-grade GPU, ranking among the fastest 720P@24fps video generation models. This model also natively supports both text-to-video and image-to-video tasks within a single unified framework, covering both academic research and practical applications.
-
-
-<div align="center">
-    <img src="assets/vae.png" alt="" style="width: 80%;" />
-</div>
-
-
-
-##### Comparisons to SOTAs
-We compared Wan2.2 with leading closed-source commercial models on our new Wan-Bench 2.0, evaluating performance across multiple crucial dimensions. The results demonstrate that Wan2.2 achieves superior performance compared to these leading models.
-
-
-<div align="center">
-    <img src="assets/performance.png" alt="" style="width: 90%;" />
-</div>
-
-## Citation
-If you find our work helpful, please cite us.
-
+# 可选：保持默认即可；{repo_root} 会替换为 WAN_REPO_ROOT
+# export WAN_SSH_TORCHRUN_PREFIX='cd {repo_root} && export PYTHONPATH={repo_root}:$PYTHONPATH && '
 ```
-@article{wan2025,
-      title={Wan: Open and Advanced Large-Scale Video Generative Models}, 
-      author={Team Wan and Ang Wang and Baole Ai and Bin Wen and Chaojie Mao and Chen-Wei Xie and Di Chen and Feiwu Yu and Haiming Zhao and Jianxiao Yang and Jianyuan Zeng and Jiayu Wang and Jingfeng Zhang and Jingren Zhou and Jinkai Wang and Jixuan Chen and Kai Zhu and Kang Zhao and Keyu Yan and Lianghua Huang and Mengyang Feng and Ningyi Zhang and Pandeng Li and Pingyu Wu and Ruihang Chu and Ruili Feng and Shiwei Zhang and Siyang Sun and Tao Fang and Tianxing Wang and Tianyi Gui and Tingyu Weng and Tong Shen and Wei Lin and Wei Wang and Wei Wang and Wenmeng Zhou and Wente Wang and Wenting Shen and Wenyuan Yu and Xianzhong Shi and Xiaoming Huang and Xin Xu and Yan Kou and Yangyu Lv and Yifei Li and Yijing Liu and Yiming Wang and Yingya Zhang and Yitong Huang and Yong Li and You Wu and Yu Liu and Yulin Pan and Yun Zheng and Yuntao Hong and Yupeng Shi and Yutong Feng and Zeyinzi Jiang and Zhen Han and Zhi-Fan Wu and Ziyu Liu},
-      journal = {arXiv preprint arXiv:2503.20314},
-      year={2025}
+
+说明：
+
+- **`WAN_NNODES` × `WAN_NPROC_PER_NODE` = 8** 时，任务 JSON / API 里 **`ulysses_size` 必须为 8**，且 **`dit_fsdp` / `t5_fsdp`** 与官方多卡示例一致。  
+- **`WAN_MASTER_PORT`** 在每次作业中由 `rdzv_id`（含 `task_id`）区分不同 rendezvous；端口需空闲。  
+- **`WAN_SSH_TORCHRUN_PREFIX`** 中的 **`{repo_root}`** 由程序替换为 `WAN_REPO_ROOT` 的绝对路径（见 `serve/config.py`）。
+
+### 5.8 启动顺序（推荐）
+
+1. **启动 Redis**（若尚未运行）。  
+2. **启动 API**（可在无 GPU 的机器上）：  
+   `export WAN_REDIS_URL=...` 等与队列、路径相关变量后执行 `python run_api_server.py`。  
+3. **仅在节点 0 启动 Worker**：  
+   ```bash
+   cd "$WAN_REPO_ROOT"
+   export PYTHONPATH="$WAN_REPO_ROOT:$PYTHONPATH"
+   python -m serve.worker_main
+   ```  
+4. 用 **curl** 提交一条任务（见上文 §4），观察 Worker 日志：应先出现本地 `torchrun`，约 2 秒后出现 SSH 在节点 1 起的第二条 `torchrun`，最后 rank 0 写 `save_file`。
+
+### 5.9 行为说明（与源码一致）
+
+`serve/launcher.py` 在 `WAN_NNODES>1` 时：
+
+1. 用 `subprocess.Popen` 在 **节点 1** 上执行：  
+   `ssh … user@node1 'bash -lc "<WAN_SSH_TORCHRUN_PREFIX><torchrun 完整命令>"'`  
+2. **约 2 秒** 后在 **节点 0** 上 `subprocess.run` 同样的 `torchrun` 命令。  
+3. 两条命令中的 **`--job_json` 为 NFS 上的同一文件**；**`--rdzv_id` 每次作业唯一**（含 `task_id`），避免与历史进程冲突。
+
+### 5.10 排障清单
+
+| 现象 | 检查项 |
+|------|--------|
+| SSH 失败 | 节点 0 上手动 `ssh user@node1`；`ssh-agent`、私钥权限、`authorized_keys`。 |
+| rendezvous 超时 / 挂住 | `WAN_MASTER_ADDR` 是否可从节点 1 `telnet`/`nc -zv` 到端口；防火墙；两机时钟是否大致同步（建议 NTP）。 |
+| NCCL 报错 | `NCCL_SOCKET_IFNAME`；必要时 `NCCL_IB_DISABLE=1` 试跑。 |
+| 节点 1 找不到模块 | 节点 1 上 `PYTHONPATH` 与 `cd` 是否与 `WAN_SSH_TORCHRUN_PREFIX` 一致；`pip show torch`。 |
+| 仅单机起进程 | `WAN_SSH_SECOND_NODE` 是否为空；`WAN_NNODES` 是否仍为 1。 |
+| OOM / 显存 | 40GB×4 跑 A14B 需 FSDP+Ulysses 与合适 `offload_model` / `convert_model_dtype`，与官方 README 多卡说明一致。 |
+
+### 5.11 与 Docker 的关系
+
+`docker-compose.yml` 默认描述 **单机多卡容器**。双机物理机 + SSH `torchrun` 时，通常做法是：**不在节点 1 上再跑一个消费同一 Redis 队列的 Worker 容器**；仅在 **节点 0** 起 Worker（裸机或单容器），并配置 `WAN_SSH_SECOND_NODE` 指向节点 1 的 **SSH 可达地址**，且两机挂载 **同一 NFS** 到相同路径。若两机都跑在容器内，还需保证 **容器到容器/宿主 SSH**、以及 **容器内 `WAN_MASTER_ADDR` 对另一机可见**（常用 host 网络或显式端口映射，视编排而定）。
+
+---
+
+## 6. 任务 JSON 与 `model` 别名
+
+HTTP 请求体会被合并为 `generate.args_from_job_dict` 可接受的字典：
+
+- 顶层 **`model`** 可为：`wan2.2-t2v-a14b`、`wan2.2-i2v-a14b`、`wan2.2-ti2v-5b`、`wan2.2-s2v-14b`、`wan2.2-animate-14b`，或直接 `WAN_CONFIGS` 里的 `task` 字符串。  
+- 其余字段与 `generate.py` 命令行一致，嵌套在 `input` / `parameters` 中亦可。  
+- `sample_guide_scale` 可为 **单个 float** 或 **两个 float 的数组**（低/高噪声专家）。  
+
+直接调用 `generate_job.py`（不经 HTTP）示例：
+
+```bash
+cat > /mnt/wan/jobs/manual.json <<'EOF'
+{
+  "model": "wan2.2-t2v-a14b",
+  "ckpt_dir": "/mnt/wan/Wan2.2-T2V-A14B",
+  "save_file": "/mnt/wan/out/manual.mp4",
+  "prompt": "Two cats boxing on stage.",
+  "size": "1280*720",
+  "dit_fsdp": true,
+  "t5_fsdp": true,
+  "ulysses_size": 8,
+  "convert_model_dtype": true,
+  "offload_model": false
 }
+EOF
+
+torchrun --nnodes=1 --nproc_per_node=8 --rdzv_backend=c10d \
+  --rdzv_endpoint=127.0.0.1:29501 --rdzv_id=manual1 \
+  /mnt/wan/Wan2.2/generate_job.py --job_json /mnt/wan/jobs/manual.json
 ```
 
-## License Agreement
-The models in this repository are licensed under the Apache 2.0 License. We claim no rights over the your generated contents, granting you the freedom to use them while ensuring that your usage complies with the provisions of this license. You are fully accountable for your use of the models, which must not involve sharing any content that violates applicable laws, causes harm to individuals or groups, disseminates personal information intended for harm, spreads misinformation, or targets vulnerable populations. For a complete list of restrictions and details regarding your rights, please refer to the full text of the [license](LICENSE.txt).
+---
 
+## 7. systemd 示例（API）
 
-## Acknowledgements
+`/etc/systemd/system/wan-api.service`：
 
-We would like to thank the contributors to the [SD3](https://huggingface.co/stabilityai/stable-diffusion-3-medium), [Qwen](https://huggingface.co/Qwen), [umt5-xxl](https://huggingface.co/google/umt5-xxl), [diffusers](https://github.com/huggingface/diffusers) and [HuggingFace](https://huggingface.co) repositories, for their open research.
+```ini
+[Unit]
+Description=Wan2.2 HTTP API
+After=network.target
 
+[Service]
+User=wan
+WorkingDirectory=/mnt/wan/Wan2.2
+Environment=PYTHONPATH=/mnt/wan/Wan2.2
+Environment=WAN_SERVE_API_KEYS=sk-prod-xxx
+Environment=WAN_REDIS_URL=redis://127.0.0.1:6379/0
+Environment=WAN_CKPT_DIR=/mnt/wan/Wan2.2-T2V-A14B
+Environment=WAN_JOB_DIR=/mnt/wan/jobs
+Environment=WAN_OUTPUT_DIR=/mnt/wan/out
+Environment=WAN_REPO_ROOT=/mnt/wan/Wan2.2
+ExecStart=/mnt/wan/venv/bin/python /mnt/wan/Wan2.2/run_api_server.py
+Restart=on-failure
 
+[Install]
+WantedBy=multi-user.target
+```
 
-## Contact Us
-If you would like to leave a message to our research or product teams, feel free to join our [Discord](https://discord.gg/AKNgpMK4Yj) or [WeChat groups](https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg)!
+Worker 类似，将 `ExecStart` 改为 `python -m serve.worker_main`，并在 GPU 节点 0 上运行。
 
+---
+
+## 8. 安全与运维建议
+
+- 仅内网暴露 API，或前置 mTLS / 零信任网关。  
+- 定期轮换 `WAN_SERVE_API_KEYS`。  
+- 大模型与生成结果路径做磁盘配额与清理任务。  
+- 监控 Redis 队列长度、worker 日志、`torchrun` 退出码。  
+
+---
+
+## 9. 容器化部署（Docker Compose）
+
+仓库提供 **CPU 版 API 镜像** 与 **GPU Worker 镜像**，由 `docker-compose.yml` 编排 Redis、API、Worker。
+
+### 9.1 前置条件
+
+- 已安装 [Docker](https://docs.docker.com/engine/install/) 与 [Docker Compose V2](https://docs.docker.com/compose/)。  
+- **Worker 所在宿主机** 安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)，并可用 `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` 验证。  
+- 将官方权重下载到宿主机目录，例如 `/data/Wan2.2-T2V-A14B`，供 **只读** 挂载到 Worker 容器的 `/ckpt`。
+
+### 9.2 配置与启动
+
+```bash
+cd /path/to/Wan2.2
+cp docker/compose.env.example .env
+# 编辑 .env：至少设置 WAN_SERVE_API_KEYS、WAN_CKPT_HOST_PATH
+```
+
+仅启动 **Redis + API**（开发机无 GPU时）：
+
+```bash
+docker compose up -d --build redis api
+```
+
+在 **带 NVIDIA GPU 的机器** 上启动完整栈（含 Worker，使用 Compose `gpu` profile）：
+
+```bash
+docker compose --profile gpu up -d --build
+```
+
+常用命令：
+
+```bash
+docker compose logs -f api worker
+docker compose ps
+```
+
+API 默认映射到宿主机 `WAN_API_PORT`（默认 `8008`）。健康检查：`GET http://<host>:8008/healthz`。
+
+### 9.3 数据卷说明
+
+| 卷名 | 挂载点 | 说明 |
+|------|--------|------|
+| `wan_shared` | 容器内 `/data` | `jobs` → `/data/jobs`，`outputs` → `/data/outputs`；API 与 Worker 共享，用于任务 JSON 与生成视频。 |
+| 绑定挂载 | `/ckpt` | 来自 `.env` 的 `WAN_CKPT_HOST_PATH`，只读挂载到 Worker。 |
+
+### 9.4 镜像构建参数（Worker）
+
+| 构建参数 | 默认 | 说明 |
+|----------|------|------|
+| `BASE_IMAGE` | `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` | 可按机房 CUDA 版本替换为官方 PyTorch 标签。 |
+| `INSTALL_FLASH_ATTN` | `0` | 设为 `1` 时尝试安装 `flash_attn`（需与基础镜像 CUDA 匹配，失败时构建仍可能继续）。 |
+
+示例：
+
+```bash
+docker build -f docker/Dockerfile.worker \
+  --build-arg INSTALL_FLASH_ATTN=1 \
+  -t wan2-worker:latest .
+```
+
+### 9.5 双机 GPU 与 Compose
+
+`docker-compose.yml` 描述的是 **单机上的多卡容器**。若要在 **两台物理机** 各跑 4 卡并沿用现有 `serve.launcher` 的 SSH 双机 `torchrun`：
+
+1. 两台机器安装 Docker + NVIDIA Toolkit，**同一 NFS** 挂载到相同路径（含代码、权重、`WAN_JOB_DIR` / `WAN_OUTPUT_DIR`）。  
+2. 在 **节点 0** 上可仍用 Compose 起 Redis（或外置托管 Redis），API 与 Worker 容器；在 **节点 1** 仅起 **Worker 容器**（或不用 Compose，直接 `docker run`），两台 Worker 不要同时消费同一队列——当前设计为 **单 worker 消费**；双机多卡推荐 **只在节点 0 起一个 Worker 容器**，并在 `.env` 中配置 `WAN_NNODES=2`、`WAN_NPROC_PER_NODE=4`、`WAN_MASTER_ADDR`、`WAN_SSH_SECOND_NODE`，由容器内 `torchrun` + SSH 拉起第二台进程（需节点 0 容器能 SSH 到节点 1，且节点 1 已安装相同镜像或具备相同 Python/torch 环境）。  
+
+更稳妥的生产方式是将 **Redis + API** 托管在控制面，**每台 GPU 机** 用 `docker run` 或 Kubernetes Job 只跑 `wan2-worker`，并改造队列分区；超出本文范围时可单独扩展。
+
+### 9.6 相关文件
+
+| 路径 | 说明 |
+|------|------|
+| `docker-compose.yml` | Redis、api、worker 服务定义 |
+| `docker/Dockerfile.api` | 仅 FastAPI 依赖的轻量 API 镜像 |
+| `docker/Dockerfile.worker` | CUDA + Wan 推理 + `serve.worker` |
+| `docker/entrypoint-worker.sh` | Worker 入口 |
+| `docker/compose.env.example` | 复制为仓库根目录 `.env` 的模板 |
+| `.dockerignore` | 减小构建上下文 |
+| `README.md` | 部署与 HTTP 服务主文档（本文件） |
+| `DEPLOY_SERVE.md` | 历史/外链兼容：仅指向 `README.md` |
+
+---
+
+## 10. 代码变更摘要
+
+| 路径 | 说明 |
+|------|------|
+| `README.md` | 部署、DashScope 风格 API、Docker 主文档 |
+| `generate.py` | `_build_parser` / `parse_args` / `args_from_job_dict` / `JOB_MODEL_ALIASES` |
+| `generate_job.py` | `torchrun` 入口，读 `--job_json` |
+| `serve/` | FastAPI、Redis、launcher、worker |
+| `run_api_server.py` | 开发用 uvicorn 启动 |
+| `requirements_serve.txt` | API 额外依赖 |
+| `docker-compose.yml` / `docker/*` | 容器化编排与镜像 |
+
+若需 **HTTPS、限流、多队列、回调 Webhook**，可在 `serve/api.py` 外再包一层网关或扩展本模块。

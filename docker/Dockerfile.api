@@ -1,0 +1,21 @@
+# CPU-only API (FastAPI + Redis client). Build from repository root:
+#   docker build -f docker/Dockerfile.api -t wan2-api:latest .
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+COPY requirements_serve.txt /app/requirements_serve.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/requirements_serve.txt
+
+COPY serve /app/serve
+COPY wan/configs /app/wan/configs
+COPY run_api_server.py /app/run_api_server.py
+
+ENV PYTHONPATH=/app
+EXPOSE 8008
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/healthz')" || exit 1
+
+CMD ["python", "/app/run_api_server.py"]
