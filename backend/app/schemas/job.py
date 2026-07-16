@@ -1,6 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel
 
 
 class GenerateRequest(BaseModel):
@@ -25,3 +25,5 @@ class JobStatus(BaseModel):
     progress: float = 0.0
     output_url: Optional[str] = None
     error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None

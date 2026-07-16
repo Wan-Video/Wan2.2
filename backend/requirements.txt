@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.6
 celery==5.4.0
 redis==5.1.1
 sqlalchemy==2.0.35
+aiosqlite==0.20.0
 psycopg2-binary==2.9.9
 python-dotenv==1.0.1
 pydantic==2.9.2

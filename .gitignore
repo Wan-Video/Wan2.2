@@ -24,3 +24,10 @@ next-env.d.ts
 .idea/
 *.swp
 *.swo
+
+# Runtime
+*.db
+*.mp4
+*.db-journal
+backend/outputs/
+backend/.env

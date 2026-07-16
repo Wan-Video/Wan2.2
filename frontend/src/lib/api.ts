@@ -13,18 +13,21 @@ export async function generateVideo(params: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "ti2v-5b", ...params }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error(`API error (${res.status}): ${err}`);
+  }
   return res.json();
 }
 
 export async function getJobStatus(jobId: string) {
   const res = await fetch(`${API_BASE}/api/status/${jobId}`);
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(`Status check failed (${res.status})`);
   return res.json();
 }
 
 export async function getDownloadUrl(jobId: string) {
   const res = await fetch(`${API_BASE}/api/download/${jobId}`);
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
   return res.json();
 }
