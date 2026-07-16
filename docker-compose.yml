@@ -1,0 +1,29 @@
+version: '3.8'
+services:
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on: [redis, postgres]
+    volumes: [./backend:/app]
+  worker:
+    build: ./backend
+    command: celery -A celery_app worker --loglevel=info --concurrency=1
+    env_file: .env
+    depends_on: [redis, postgres]
+    volumes:
+      - ./wan2.2:/workspace/Wan2.2
+      - ./backend:/app
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: wan22, POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+volumes: {pgdata:}
