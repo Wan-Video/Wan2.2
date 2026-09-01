@@ -34,6 +34,7 @@ from .utils.fm_solvers import (
     retrieve_timesteps,
 )
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .utils.frame_sampling import sample_video_frame_indices
 
 
 def load_safetensors(path):
@@ -316,22 +317,14 @@ class WanS2V:
         original_fps = vr.get_avg_fps()
         total_frames = len(vr)
 
-        interval = max(1, round(original_fps / target_fps))
+        sampled_indices = sample_video_frame_indices(
+            original_fps=original_fps,
+            total_frames=total_frames,
+            target_fps=target_fps,
+            num_frames=n_frames,
+            from_start=reverse)
 
-        required_span = (n_frames - 1) * interval
-
-        start_frame = max(0, total_frames - required_span -
-                          1) if not reverse else 0
-
-        sampled_indices = []
-        for i in range(n_frames):
-            indice = start_frame + i * interval
-            if indice >= total_frames:
-                break
-            else:
-                sampled_indices.append(indice)
-
-        return vr.get_batch(sampled_indices).asnumpy()
+        return vr.get_batch(sampled_indices.tolist()).asnumpy()
 
     def load_pose_cond(self, pose_video, num_repeat, infer_frames, size):
         HEIGHT, WIDTH = size
