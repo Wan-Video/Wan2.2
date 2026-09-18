@@ -96,8 +96,13 @@ cd Wan2.2
 Install dependencies:
 ```sh
 # Ensure torch >= 2.4.0
-# If the installation of `flash_attn` fails, try installing the other packages first and install `flash_attn` last
 pip install -r requirements.txt
+
+# `flash_attn` is required at inference time but is built from source and needs a
+# CUDA toolchain, so it is installed separately: a failure here no longer aborts
+# the rest of the install. See INSTALL.md if the build fails.
+pip install flash_attn --no-build-isolation
+
 # If you want to use CosyVoice to synthesize speech for Speech-to-Video Generation, please install requirements_s2v.txt additionally
 pip install -r requirements_s2v.txt
 ```

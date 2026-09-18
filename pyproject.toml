@@ -15,18 +15,20 @@ requires-python = ">=3.10,<4.0"
 dependencies = [
     "torch>=2.4.0",
     "torchvision>=0.19.0",
+    "torchaudio",
     "opencv-python>=4.9.0.80",
     "diffusers>=0.31.0",
-    "transformers>=4.49.0",
+    "transformers>=4.49.0,<=4.51.3",
     "tokenizers>=0.20.3",
     "accelerate>=1.1.1",
     "tqdm",
-    "imageio",
+    "imageio[ffmpeg]",
     "easydict",
     "ftfy",
     "dashscope",
     "imageio-ffmpeg",
-    "flash_attn",
+    "einops",
+    "scipy",
     "numpy>=1.23.5,<2"
 ]
 
