@@ -9,7 +9,7 @@ from loguru import logger
 from PIL import Image
 try:
     import moviepy.editor as mpy
-except:
+except ImportError:
     import moviepy as mpy
 
 from decord import VideoReader

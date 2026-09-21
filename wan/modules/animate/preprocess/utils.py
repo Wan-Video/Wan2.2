@@ -137,7 +137,7 @@ def resize_by_area(image, target_area, keep_aspect_ratio=True, divisor=64, paddi
     h, w = image.shape[:2]
     try:
         new_w, new_h = calculate_new_size(w, h, target_area, divisor)
-    except:
+    except Exception:
         aspect_ratio = w / h
 
         if keep_aspect_ratio:

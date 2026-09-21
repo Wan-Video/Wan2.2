@@ -24,7 +24,7 @@ def read_img(image, convert='RGB', check_exist=False):
             img = Image.open(image)
             if convert:
                 img = img.convert(convert)
-        except:
+        except (IOError, OSError):
             raise IOError('File error: ', image)
         return np.asarray(img)
     else:
