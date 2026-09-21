@@ -98,6 +98,9 @@ class WanTI2V:
         self.vae = Wan2_2_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
+        if self.init_on_cpu:
+            self.vae.model.encoder.to(torch.device('cpu'))
+            self.vae.model.decoder.to(torch.device('cpu'))
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir)
@@ -393,15 +396,30 @@ class WanTI2V:
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
             x0 = latents
+
             if offload_model:
                 self.model.cpu()
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
-            if self.rank == 0:
-                videos = self.vae.decode(x0)
 
         del noise, latents
         del sample_scheduler
+
+        if self.rank == 0:
+            if offload_model or self.init_on_cpu:
+                self.vae.model.decoder.to(self.device)
+
+            with (
+                    torch.amp.autocast('cuda', dtype=self.param_dtype),
+                    torch.no_grad(),
+                    no_sync(),
+            ):
+                videos = self.vae.decode(x0, offload_cache=offload_model)
+
+            if offload_model:
+                self.vae.model.decoder.cpu()
+
+        del x0
         if offload_model:
             gc.collect()
             torch.cuda.synchronize()
@@ -509,7 +527,14 @@ class WanTI2V:
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
 
+        if offload_model or self.init_on_cpu:
+            self.vae.model.encoder.to(self.device)
+            torch.cuda.empty_cache()
+
         z = self.vae.encode([img])
+        if offload_model:
+            self.vae.model.encoder.cpu()
+            self.vae.model.decoder.cpu()
 
         @contextmanager
         def noop_no_sync():
@@ -605,11 +630,24 @@ class WanTI2V:
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
 
-            if self.rank == 0:
-                videos = self.vae.decode(x0)
-
-        del noise, latent, x0
+        del noise, latent
         del sample_scheduler
+
+        if self.rank == 0:
+            if offload_model or self.init_on_cpu:
+                self.vae.model.decoder.to(self.device)
+
+            with (
+                    torch.amp.autocast('cuda', dtype=self.param_dtype),
+                    torch.no_grad(),
+                    no_sync(),
+            ):
+                videos = self.vae.decode(x0, offload_cache=offload_model)
+
+            if offload_model:
+                self.vae.model.decoder.cpu()
+
+        del x0
         if offload_model:
             gc.collect()
             torch.cuda.synchronize()
