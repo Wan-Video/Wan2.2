@@ -635,6 +635,13 @@ def retarget_pose(src_skeleton, dst_skeleton, all_src_skeleton, src_skeleton_edi
             scale_min_edit = np.sqrt(src_skeleton_edit['height'] * src_skeleton_edit['width']) / np.sqrt(dst_skeleton_edit['height'] * dst_skeleton_edit['width'])
             scale_ratio_flag = True
         
+        if dst_skeleton_edit['keypoints_body'][0] != None and dst_skeleton_edit['keypoints_body'][8] != None and dst_skeleton_edit['keypoints_body'][11] != None and \
+            dst_skeleton_edit['keypoints_body'][0][1] < 1 and dst_skeleton_edit['keypoints_body'][8][1] < 1 and dst_skeleton_edit['keypoints_body'][11][1] < 1 and \
+            dst_skeleton_edit['keypoints_body'][0][2] > 0.5 and dst_skeleton_edit['keypoints_body'][8][2] > 0.5 and dst_skeleton_edit['keypoints_body'][11][2] > 0.5:
+            if dst_skeleton['keypoints_body'][8] == None or dst_skeleton['keypoints_body'][11] == None or \
+                dst_skeleton['keypoints_body'][8][2] < 0.5 or dst_skeleton['keypoints_body'][11][2] < 0.5:
+                scale_ratio_flag = True
+        
         # Flux may change the scale, compensate for it here
         ratio_src = calculate_scale_ratio(src_skeleton, src_skeleton_edit, scale_ratio_flag)
         ratio_dst = calculate_scale_ratio(dst_skeleton, dst_skeleton_edit, scale_ratio_flag)
