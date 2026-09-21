@@ -14,3 +14,4 @@ dashscope
 imageio-ffmpeg
 flash_attn
 numpy>=1.23.5,<2
+decord
