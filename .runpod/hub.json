@@ -1,0 +1,19 @@
+{
+  "title": "Wan2.2 Patched Return",
+  "description": "Custom RunPod endpoint for Wan2.2 with MP4 Base64 return output.",
+  "type": "serverless",
+  "category": "video",
+  "iconUrl": "https://cdn-icons-png.flaticon.com/512/2921/2921222.png",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 40,
+    "presets": [
+      {
+        "id": "default",
+        "gpu": "A10G",
+        "memoryInGb": 24,
+        "cpus": 8
+      }
+    ]
+  }
+}

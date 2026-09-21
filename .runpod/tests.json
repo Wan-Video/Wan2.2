@@ -1,0 +1,13 @@
+{
+  "tests": [
+    {
+      "name": "basic_video_test",
+      "input": {
+        "prompt": "A cinematic scene of ocean waves at sunset",
+        "seed": 42,
+        "num_frames": 12
+      },
+      "timeout": 120000
+    }
+  ]
+}

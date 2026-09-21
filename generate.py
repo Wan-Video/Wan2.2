@@ -568,6 +568,30 @@ def generate(args):
         dist.destroy_process_group()
 
     logging.info("Finished.")
+# --- Added for RunPod serverless return ---
+import os, base64, json
+
+def export_video_to_base64():
+    """Encode the final MP4 video as base64 for RunPod endpoint return."""
+    # Locate the video file
+    output_path = args.save_file if hasattr(args, "save_file") else "/workspace/output/video.mp4"
+    if not output_path.endswith(".mp4"):
+        output_path = f"{output_path}.mp4"
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    if os.path.exists(output_path):
+        with open(output_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+        print(json.dumps({"video_base64": encoded}))
+    else:
+        print(f"⚠️ Video not found at {output_path}")
+
+try:
+    export_video_to_base64()
+except Exception as e:
+    print("⚠️ Error returning MP4:", e)
+# --- End of patch ---
 
 
 if __name__ == "__main__":
