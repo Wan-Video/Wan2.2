@@ -65,6 +65,10 @@ def attention(
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
 
     if mode == "torch":
+        # Apply the layout transformation
+        q = pre_attn_layout(q)
+        k = pre_attn_layout(k)
+        v = pre_attn_layout(v)
         if attn_mask is not None and attn_mask.dtype != torch.bool:
             attn_mask = attn_mask.to(q.dtype)
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
@@ -77,6 +81,10 @@ def attention(
         )
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
     elif mode == "vanilla":
+        # Apply the layout transformation
+        q = pre_attn_layout(q)
+        k = pre_attn_layout(k)
+        v = pre_attn_layout(v)
         scale_factor = 1 / math.sqrt(q.size(-1))
 
         b, a, s, _ = q.shape
