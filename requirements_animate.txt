@@ -1,3 +1,4 @@
+moviepy
 decord
 peft
 onnxruntime
