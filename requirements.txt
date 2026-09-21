@@ -12,5 +12,6 @@ easydict
 ftfy
 dashscope
 imageio-ffmpeg
-flash_attn
+einops
+scipy
 numpy>=1.23.5,<2

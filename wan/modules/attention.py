@@ -109,7 +109,12 @@ def flash_attention(
             causal=causal,
             deterministic=deterministic)[0].unflatten(0, (b, lq))
     else:
-        assert FLASH_ATTN_2_AVAILABLE
+        if not FLASH_ATTN_2_AVAILABLE:
+            raise RuntimeError(
+                'flash_attn is required to run Wan but is not installed. '
+                'Install it with `pip install flash_attn --no-build-isolation` '
+                '(it needs a CUDA toolchain to build); see INSTALL.md for '
+                'troubleshooting.')
         x = flash_attn.flash_attn_varlen_func(
             q=q,
             k=k,
