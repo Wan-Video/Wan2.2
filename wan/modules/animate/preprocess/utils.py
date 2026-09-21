@@ -14,6 +14,13 @@ def get_mask_boxes(mask):
 
     """
     y_coords, x_coords = np.nonzero(mask)
+    
+    # Handle empty mask: return full frame fallback to prevent crash
+    if len(x_coords) == 0 or len(y_coords) == 0:
+        h, w = mask.shape
+        # Return a valid full-frame bounding box
+        return np.array([0, 0, w-1, h-1]).astype(np.int32)
+    
     x_min = x_coords.min()
     x_max = x_coords.max()
     y_min = y_coords.min()
