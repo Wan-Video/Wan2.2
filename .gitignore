@@ -5,3 +5,29 @@ tmp_examples*
 new_checkpoint*
 batch_test*
 nohup*
+
+# Backend
+*.pyc
+__pycache__/
+.env
+*.egg-info/
+dist/
+build/
+
+# Frontend
+node_modules/
+.next/
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Runtime
+*.db
+*.mp4
+*.db-journal
+backend/outputs/
+backend/.env
