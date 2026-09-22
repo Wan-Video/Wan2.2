@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -20,6 +19,7 @@ from .distributed.fsdp import shard_model
 from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
 from .distributed.util import get_world_size
 from .modules.model import WanModel
+from .modules.quant import quantize_dit_
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_2 import Wan2_2_VAE
 from .utils.fm_solvers import (
@@ -45,6 +45,10 @@ class WanTI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        dit_quant='none',
+        t5_fp32_compute=False,
+        t5_batch=False,
+        t5_cache=0,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -71,11 +75,28 @@ class WanTI2V:
             convert_model_dtype (`bool`, *optional*, defaults to False):
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
+            dit_quant (`str`, *optional*, defaults to 'none'):
+                Quantize the transformer-block Linear weights to FP8.
+                'none' keeps the model exactly as upstream. 'fp8' uses W8A8
+                with FP8 matmul, 'fp8_wo' stores FP8 weights but computes in
+                bf16. Both visibly change the output -- see wan/modules/quant.py.
+                Only works without FSDP.
+            t5_fp32_compute (`bool`, *optional*, defaults to False):
+                Run T5's Linear layers in float32 while keeping bf16 weights.
+                Only useful with t5_cpu: bfloat16 matmul is emulated on CPUs
+                without AVX512-BF16/AMX and is several times slower than fp32.
+            t5_batch (`bool`, *optional*, defaults to False):
+                Encode the positive and negative prompt in one forward instead
+                of two. Not bit-identical to two separate calls.
+            t5_cache (`int`, *optional*, defaults to 0):
+                Size of the prompt-embedding LRU. 2 is enough to keep the
+                negative prompt across runs in one process.
         """
         self.device = torch.device(f"cuda:{device_id}")
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
+        self.t5_batch = t5_batch
         self.init_on_cpu = init_on_cpu
 
         self.num_train_timesteps = config.num_train_timesteps
@@ -86,6 +107,8 @@ class WanTI2V:
 
         shard_fn = partial(shard_model, device_id=device_id)
         self.text_encoder = T5EncoderModel(
+            fp32_compute=t5_fp32_compute,
+            cache_size=t5_cache,
             text_len=config.text_len,
             dtype=config.t5_dtype,
             device=torch.device('cpu'),
@@ -101,12 +124,14 @@ class WanTI2V:
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir)
+        self.quant_stats = None
         self.model = self._configure_model(
             model=self.model,
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+            dit_quant=dit_quant)
 
         if use_sp:
             self.sp_size = get_world_size()
@@ -115,8 +140,39 @@ class WanTI2V:
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
+    def _encode_prompts(self, input_prompt, n_prompt, offload_model):
+        """
+        Encode the positive and negative prompt, returning (context,
+        context_null) on self.device.
+
+        This used to be duplicated verbatim in t2v() and i2v(). Keeping one
+        copy means the batching and caching options cannot drift between the
+        two paths.
+        """
+        if self.t5_cpu:
+            target = torch.device('cpu')
+        else:
+            target = self.device
+            self.text_encoder.model.to(self.device)
+
+        if self.t5_batch:
+            both = self.text_encoder([input_prompt, n_prompt], target)
+            context, context_null = [both[0]], [both[1]]
+        else:
+            context = self.text_encoder([input_prompt], target)
+            context_null = self.text_encoder([n_prompt], target)
+
+        if not self.t5_cpu:
+            if offload_model:
+                self.text_encoder.model.cpu()
+        else:
+            context = [t.to(self.device) for t in context]
+            context_null = [t.to(self.device) for t in context_null]
+
+        return context, context_null
+
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
+                         convert_model_dtype, dit_quant='none'):
         """
         Configures a model object. This includes setting evaluation modes,
         applying distributed parallel strategy, and handling device placement.
@@ -150,11 +206,22 @@ class WanTI2V:
             dist.barrier()
 
         if dit_fsdp:
+            if dit_quant != 'none':
+                raise ValueError(
+                    'dit_quant is not supported together with dit_fsdp')
             model = shard_fn(model)
         else:
             if convert_model_dtype:
                 model.to(self.param_dtype)
-            if not self.init_on_cpu:
+            if dit_quant != 'none':
+                # Quantizing moves each block Linear to the device as it is
+                # converted, so the model ends up resident and there is no
+                # reason to keep pretending it lives on the CPU.
+                self.quant_stats = quantize_dit_(
+                    model, dit_quant, self.device, self.param_dtype)
+                model.to(self.device)
+                self.init_on_cpu = False
+            elif not self.init_on_cpu:
                 model.to(self.device)
 
         return model
@@ -296,17 +363,8 @@ class WanTI2V:
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
-        else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+        context, context_null = self._encode_prompts(
+            input_prompt, n_prompt, offload_model)
 
         noise = [
             torch.randn(
@@ -355,7 +413,7 @@ class WanTI2V:
 
             # sample videos
             latents = noise
-            mask1, mask2 = masks_like(noise, zero=False)
+            _, mask2 = masks_like(noise, zero=False)
 
             arg_c = {'context': context, 'seq_len': seq_len}
             arg_null = {'context': context_null, 'seq_len': seq_len}
@@ -366,9 +424,7 @@ class WanTI2V:
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
-                timestep = [t]
-
-                timestep = torch.stack(timestep)
+                timestep = t.unsqueeze(0)
 
                 temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
                 temp_ts = torch.cat([
@@ -497,17 +553,8 @@ class WanTI2V:
             n_prompt = self.sample_neg_prompt
 
         # preprocess
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
-        else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+        context, context_null = self._encode_prompts(
+            input_prompt, n_prompt, offload_model)
 
         z = self.vae.encode([img])
 
@@ -547,8 +594,12 @@ class WanTI2V:
 
             # sample videos
             latent = noise
-            mask1, mask2 = masks_like([noise], zero=True)
-            latent = (1. - mask2[0]) * z[0] + mask2[0] * latent
+            _, mask2 = masks_like([noise], zero=True)
+            # mask2 and z are fixed for the whole loop, so build the complement
+            # and the conditioning term once instead of on every step.
+            keep_mask = mask2[0]
+            cond_term = (1. - keep_mask) * z[0]
+            latent = cond_term + keep_mask * latent
 
             arg_c = {
                 'context': [context[0]],
@@ -565,26 +616,28 @@ class WanTI2V:
                 torch.cuda.empty_cache()
 
             for _, t in enumerate(tqdm(timesteps)):
-                latent_model_input = [latent.to(self.device)]
-                timestep = [t]
+                # latent already lives on self.device; the old .to() was a no-op
+                # and torch.stack([t]) just rebuilt a 1-element tensor.
+                latent_model_input = [latent]
+                timestep = t.unsqueeze(0)
 
-                timestep = torch.stack(timestep).to(self.device)
-
-                temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
+                temp_ts = (keep_mask[0][:, ::2, ::2] * timestep).flatten()
                 temp_ts = torch.cat([
                     temp_ts,
                     temp_ts.new_ones(seq_len - temp_ts.size(0)) * timestep
                 ])
                 timestep = temp_ts.unsqueeze(0)
 
+                # NOTE: no torch.cuda.empty_cache() here. It used to run twice
+                # per step, and each call synchronizes the device and returns
+                # every cached block to the driver, so the next forward had to
+                # re-acquire them through cudaMalloc. The allocation pattern is
+                # identical on every iteration, so the cache is exactly what we
+                # want to keep. The t2v loop above never did this.
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
-                if offload_model:
-                    torch.cuda.empty_cache()
                 noise_pred_uncond = self.model(
                     latent_model_input, t=timestep, **arg_null)[0]
-                if offload_model:
-                    torch.cuda.empty_cache()
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
 
@@ -594,11 +647,9 @@ class WanTI2V:
                     latent.unsqueeze(0),
                     return_dict=False,
                     generator=seed_g)[0]
-                latent = temp_x0.squeeze(0)
-                latent = (1. - mask2[0]) * z[0] + mask2[0] * latent
+                latent = cond_term + keep_mask * temp_x0.squeeze(0)
 
-                x0 = [latent]
-                del latent_model_input, timestep
+            x0 = [latent]
 
             if offload_model:
                 self.model.cpu()

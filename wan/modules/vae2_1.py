@@ -610,8 +610,12 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
 
     # load checkpoint
     logging.info(f'loading {pretrained_path}')
+    # weights_only=False is required: these are first-party Wan checkpoints
+    # saved in the legacy .tar format, which PyTorch 2.6+ refuses to load
+    # under its new weights_only=True default.
     model.load_state_dict(
-        torch.load(pretrained_path, map_location=device), assign=True)
+        torch.load(pretrained_path, map_location=device, weights_only=False),
+        assign=True)
 
     return model
 

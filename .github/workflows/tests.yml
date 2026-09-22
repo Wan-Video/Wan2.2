@@ -1,0 +1,73 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          # CPU wheels keep the runner fast; the CUDA-only tests skip themselves.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Import check
+        # Guards the lazy-import wiring in wan/__init__.py: importing the
+        # package must not require the optional s2v / animate stacks, and must
+        # not require flash-attn.
+        run: python -c "import wan; print(wan.WanTI2V, wan.WanT2V, wan.WanI2V)"
+
+      - name: Run tests
+        run: pytest tests -v
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - run: pip install flake8
+
+      - name: flake8 (syntax errors and undefined names)
+        # Scoped to the core pipeline, which is clean. The animate subtree is
+        # excluded because it carries five pre-existing F821 undefined-name
+        # bugs that are real but out of scope to fix here:
+        #   wan/animate.py:430                     out_frames
+        #   .../preprocess/human_visualization.py  alphaMerge
+        #   .../preprocess/pose2d_utils.py:21      osp
+        #   .../preprocess/pose2d_utils.py:1122    last_kp2ds_body
+        #   .../preprocess/pose2d_utils.py:1147    last_kp2ds_body
+        # Drop the --exclude once those are fixed.
+        run: |
+          flake8 generate.py wan tests --count \
+            --select=E9,F63,F7,F82,F821 \
+            --exclude=wan/modules/animate/preprocess,wan/animate.py \
+            --show-source --statistics
+
+  # NOTE: formatting is deliberately not enforced. The checked-in code does not
+  # match any stock yapf style (the closest, google, still differs on ~94 lines
+  # of wan/text2video.py alone) and `isort --check` fails on wan/animate.py and
+  # wan/speech2video.py. Gating on either would mean reformatting ~19k lines of
+  # upstream code. `make format` remains available for new work.

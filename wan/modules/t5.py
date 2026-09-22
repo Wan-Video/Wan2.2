@@ -1,6 +1,7 @@
 # Modified from transformers.models.t5.modeling_t5
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
+from collections import OrderedDict
 import math
 
 import torch
@@ -469,6 +470,55 @@ def umt5_xxl(**kwargs):
     return _t5('umt5-xxl', **cfg)
 
 
+class _Fp32ComputeLinear(nn.Module):
+    """
+    Keeps the weight in its stored dtype but runs the matmul in float32.
+
+    On a CPU without AVX512-BF16/AMX, torch emulates bfloat16 matmul and it is
+    dramatically slower than float32 -- measured on a 24-core mobile CPU, a
+    single 512-token UMT5-XXL forward takes 91.7 s in bf16 and 8.9 s in fp32.
+    Converting the whole model to fp32 would fix the speed but double its
+    resident size (10.6 GB -> 21.2 GB), which does not fit comfortably beside
+    the DiT on a 32 GB machine. Casting per call keeps the 10.6 GB footprint
+    and recovers most of the speed: ~3.3x on the shapes UMT5-XXL uses, with the
+    cast itself costing about 10%.
+
+    bfloat16 values are exactly representable in float32, so the weight cast is
+    lossless; only the accumulation differs.
+    """
+
+    def __init__(self, linear):
+        super().__init__()
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.register_buffer('weight', linear.weight.data, persistent=False)
+        if linear.bias is not None:
+            self.register_buffer('bias', linear.bias.data, persistent=False)
+        else:
+            self.bias = None
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, compute=float32'.format(
+            self.in_features, self.out_features)
+
+    def forward(self, x):
+        out_dtype = x.dtype
+        bias = None if self.bias is None else self.bias.float()
+        out = F.linear(x.float(), self.weight.float(), bias)
+        return out.to(out_dtype)
+
+
+def enable_fp32_compute_(model):
+    """Swap every nn.Linear for an fp32-compute wrapper, in place."""
+    converted = 0
+    for parent in model.modules():
+        for name, child in list(parent.named_children()):
+            if isinstance(child, nn.Linear):
+                setattr(parent, name, _Fp32ComputeLinear(child))
+                converted += 1
+    return converted
+
+
 class T5EncoderModel:
 
     def __init__(
@@ -479,12 +529,17 @@ class T5EncoderModel:
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
+        fp32_compute=False,
+        cache_size=0,
     ):
         self.text_len = text_len
         self.dtype = dtype
         self.device = device
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
+        self.fp32_compute = fp32_compute
+        self.cache_size = int(cache_size)
+        self._cache = OrderedDict()
 
         # init model
         model = umt5_xxl(
@@ -493,17 +548,38 @@ class T5EncoderModel:
             dtype=dtype,
             device=device).eval().requires_grad_(False)
         logging.info(f'loading {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        # weights_only=False: first-party checkpoint in the legacy .tar
+        # format, unloadable under PyTorch 2.6+ defaults.
+        model.load_state_dict(
+            torch.load(
+                checkpoint_path, map_location='cpu', weights_only=False))
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)
         else:
             self.model.to(self.device)
+        if fp32_compute:
+            n = enable_fp32_compute_(self.model)
+            logging.info(
+                'T5: running %d Linear layers with float32 compute '
+                '(weights stay %s)', n, dtype)
+
         # init tokenizer
         self.tokenizer = HuggingfaceTokenizer(
             name=tokenizer_path, seq_len=text_len, clean='whitespace')
 
-    def __call__(self, texts, device):
+    def _cache_key(self, text, device):
+        """
+        Everything that can change the embedding for a given text.
+
+        Includes the checkpoint path so two encoders loaded from different
+        weights never share entries, and the compute mode because fp32 compute
+        does not produce the same bits as bf16 compute.
+        """
+        return (text, str(device), str(self.dtype), self.text_len,
+                self.checkpoint_path, self.tokenizer_path, self.fp32_compute)
+
+    def _encode(self, texts, device):
         ids, mask = self.tokenizer(
             texts, return_mask=True, add_special_tokens=True)
         ids = ids.to(device)
@@ -511,3 +587,44 @@ class T5EncoderModel:
         seq_lens = mask.gt(0).sum(dim=1).long()
         context = self.model(ids, mask)
         return [u[:v] for u, v in zip(context, seq_lens)]
+
+    def __call__(self, texts, device):
+        """
+        Encode a list of prompts. Unchanged contract: one tensor out per text,
+        trimmed to that text's unpadded length, in the input order.
+
+        With cache_size > 0, texts already seen are served from a small LRU and
+        the remainder are encoded in a single forward.
+        """
+        if isinstance(texts, str):
+            texts = [texts]
+        if self.cache_size <= 0:
+            return self._encode(texts, device)
+
+        out = [None] * len(texts)
+        todo, todo_idx = [], []
+        for i, t in enumerate(texts):
+            key = self._cache_key(t, device)
+            hit = self._cache.get(key)
+            if hit is None:
+                todo.append(t)
+                todo_idx.append(i)
+            else:
+                self._cache.move_to_end(key)
+                # hand back a copy so a caller mutating it cannot poison the
+                # cache, and so the cached tensor keeps its own lifetime
+                out[i] = hit.clone().to(device)
+
+        if todo:
+            fresh = self._encode(todo, device)
+            for i, t, emb in zip(todo_idx, todo, fresh):
+                out[i] = emb
+                self._cache[self._cache_key(t, device)] = emb.detach().clone()
+                while len(self._cache) > self.cache_size:
+                    self._cache.popitem(last=False)
+
+        return out
+
+    def clear_cache(self):
+        """Drop cached embeddings, e.g. after moving the model."""
+        self._cache.clear()

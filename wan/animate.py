@@ -185,7 +185,8 @@ class WanAnimate:
             )
             model.add_adapter(lora_config)
             lora_path = os.path.join(checkpoint_dir, config.lora_checkpoint)
-            peft_state_dict = torch.load(lora_path)["state_dict"]
+            peft_state_dict = torch.load(
+                lora_path, weights_only=False)["state_dict"]
             set_peft_model_state_dict(model, peft_state_dict)
 
         if dit_fsdp:
