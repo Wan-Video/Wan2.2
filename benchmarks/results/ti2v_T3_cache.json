@@ -1,0 +1,93 @@
+{
+  "label": "T3_cache",
+  "timestamp": "2026-09-22T20:22:19",
+  "config": {
+    "task": "ti2v-5B",
+    "size": "832*480",
+    "frame_num": 5,
+    "sample_steps": 4,
+    "sample_solver": "unipc",
+    "sample_shift": 5.0,
+    "guide_scale": 5.0,
+    "base_seed": 42,
+    "prompt": "a cat walking on a beach",
+    "dit_quant": "fp8",
+    "offload_model": true,
+    "convert_model_dtype": true,
+    "t5_cpu": true,
+    "t5_fp32_compute": true,
+    "t5_batch": true,
+    "t5_cache": 4,
+    "repeat": 2,
+    "vae_tile": true,
+    "vae_tile_size": 16,
+    "vae_tile_overlap": 8
+  },
+  "env": {
+    "torch": "2.6.0+cu124",
+    "cuda": "12.4",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "sm": "8.9",
+    "vram_total_gb": 8.0,
+    "platform": "Windows-10-10.0.26200-SP0"
+  },
+  "vram_free_before_load_gb": 6.93,
+  "ram_total_gb": 31.73,
+  "ram_used_gb": 9.21,
+  "t_model_load_s": 70.67,
+  "quant": {
+    "mode": "fp8",
+    "converted": 300,
+    "gb_before": 9.313,
+    "gb_after": 4.743
+  },
+  "dit_weight_gb": 4.743,
+  "vram_free_after_load_gb": 0.0,
+  "vram_alloc_after_load_gb": 7.38,
+  "nvsmi_mem_used_after_load_gb": 7.48,
+  "estimated_spill_gb": 0.0,
+  "per_run": [
+    {
+      "run": 0,
+      "t_total_s": 184.59,
+      "t_t5_s": 96.36,
+      "t_vae_decode_s": 13.67,
+      "t_dit_forward_s": 73.09
+    },
+    {
+      "run": 1,
+      "t_total_s": 122.17,
+      "t_t5_s": 0.0,
+      "t_vae_decode_s": 9.7,
+      "t_dit_forward_s": 110.66
+    }
+  ],
+  "t_generate_s": 184.59,
+  "t_t5_encode_s": 96.36,
+  "t_vae_encode_s": 0.0,
+  "t_vae_decode_s": 13.67,
+  "t_dit_forward_s": 73.09,
+  "dit_forward_calls": 8,
+  "t_transfer_and_other_s": 1.47,
+  "sec_per_step": 18.273,
+  "sec_per_dit_forward": 4.568,
+  "nvsmi_mem_used_during_denoise_gb": 7.52,
+  "peak_vram_alloc_gb": 7.7,
+  "peak_vram_reserved_gb": 8.29,
+  "proc_ram_gb": 14.63,
+  "gpu_util_mean_pct": 70.8,
+  "gpu_util_median_pct": 100.0,
+  "gpu_util_max_pct": 100.0,
+  "gpu_mem_used_max_mib": 7751.0,
+  "samples": 149,
+  "tensor_path": "K:\\wan\\Wan2.2\\benchmarks\\results\\ti2v_T3_cache.npy",
+  "t_video_write_s": 0.19,
+  "video_path": "K:\\wan\\Wan2.2\\benchmarks\\results\\ti2v_T3_cache.mp4",
+  "video_shape": [
+    3,
+    5,
+    480,
+    832
+  ],
+  "t_total_wall_s": 377.77
+}

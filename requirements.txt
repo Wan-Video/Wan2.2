@@ -9,8 +9,13 @@ accelerate>=1.1.1
 tqdm
 imageio[ffmpeg]
 easydict
+einops
 ftfy
 dashscope
 imageio-ffmpeg
-flash_attn
+# flash_attn is OPTIONAL. wan/modules/attention.py falls back to PyTorch's
+# scaled_dot_product_attention when it is absent, which is slower but gives
+# equivalent results. It has no official Windows wheel and needs a long
+# source build, so it is not required here. To install it anyway:
+#   pip install flash-attn --no-build-isolation
 numpy>=1.23.5,<2

@@ -23,19 +23,24 @@ dependencies = [
     "tqdm",
     "imageio",
     "easydict",
+    "einops",
     "ftfy",
     "dashscope",
     "imageio-ffmpeg",
-    "flash_attn",
     "numpy>=1.23.5,<2"
 ]
 
 [project.optional-dependencies]
+# flash-attn has no official Windows wheel and needs a long source build.
+# wan/modules/attention.py falls back to torch SDPA when it is missing.
+flash-attn = ["flash_attn"]
+animate = ["decord", "peft", "onnxruntime", "pandas", "matplotlib", "loguru", "sentencepiece"]
+s2v = ["openai-whisper", "onnxruntime", "librosa", "decord", "omegaconf", "modelscope"]
 dev = [
     "pytest",
-    "black",
     "flake8",
     "isort",
+    "yapf",
     "mypy",
     "huggingface-hub[cli]"
 ]
@@ -48,19 +53,19 @@ huggingface = "https://huggingface.co/Wan-AI/"
 modelscope = "https://modelscope.cn/organization/Wan-AI"
 discord = "https://discord.gg/p5XbdQV7"
 
-[tool.setuptools]
-packages = ["wan"]
+[tool.setuptools.packages.find]
+include = ["wan*"]
 
-[tool.setuptools.package-data]
-"wan" = ["**/*.py"]
-
-[tool.black]
-line-length = 88
+[tool.yapf]
+based_on_style = "pep8"
 
 [tool.isort]
 profile = "black"
 
 [tool.mypy]
-strict = true
+# The codebase is almost entirely unannotated, so strict mode would emit
+# thousands of errors and get ignored. Start permissive and tighten per-module
+# as annotations land.
+ignore_missing_imports = true
 
 

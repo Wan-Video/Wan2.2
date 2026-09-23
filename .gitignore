@@ -5,3 +5,20 @@ tmp_examples*
 new_checkpoint*
 batch_test*
 nohup*
+# generated output (generate.py writes the .mp4 into the repo root by default)
+*.mp4
+tts.wav
+
+# runtime downloads (wan/speech2video.py clones these into the CWD)
+CosyVoice/
+CosyVoice2-0.5B/
+
+# local envs / caches
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# benchmark artifacts (the .json results are meant to be kept)
+benchmarks/results/*.npy
+benchmarks/results/*.mp4

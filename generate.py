@@ -6,7 +6,13 @@ import sys
 import warnings
 from datetime import datetime
 
-warnings.filterwarnings('ignore')
+# Silence only the noisy third-party deprecation chatter. The blanket
+# filterwarnings('ignore') that used to be here also hid our own notices --
+# most importantly the 'flash-attn missing, falling back to SDPA' warning
+# and the VAE autocast warning, which are exactly what a user debugging a
+# slow or failing run needs to see.
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import random
 
@@ -18,6 +24,7 @@ import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
+from wan.modules.quant import QUANT_MODES
 from wan.utils.utils import merge_video_audio, save_video, str2bool
 
 
@@ -60,10 +67,23 @@ EXAMPLE_PROMPT = {
 
 
 def _validate_args(args):
-    # Basic check
-    assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
-    assert args.task in WAN_CONFIGS, f"Unsupport task: {args.task}"
-    assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
+    # Basic check. These are user-facing input checks, so they raise instead of
+    # asserting: assertions are stripped under `python -O`, which would turn
+    # every one of them into a silent no-op.
+    if args.task not in WAN_CONFIGS:
+        raise ValueError(
+            f"Unsupported task: {args.task}. Choose one of: "
+            f"{', '.join(sorted(WAN_CONFIGS))}")
+    if args.task not in EXAMPLE_PROMPT:
+        raise ValueError(f"No example prompt registered for task: {args.task}")
+    if args.ckpt_dir is None:
+        raise ValueError("Please specify the checkpoint directory "
+                         "with --ckpt_dir.")
+    if not os.path.isdir(args.ckpt_dir):
+        # Catch this here rather than several minutes and several GB of model
+        # loading later, deep inside from_pretrained.
+        raise ValueError(
+            f"--ckpt_dir does not exist or is not a directory: {args.ckpt_dir}")
 
     if args.prompt is None:
         args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
@@ -93,13 +113,44 @@ def _validate_args(args):
     if args.frame_num is None:
         args.frame_num = cfg.frame_num
 
+    # The temporal VAE stride makes 4n+1 a hard requirement; --help has always
+    # said so but nothing enforced it, so a bad value silently produced a
+    # wrong-shaped latent or failed deep inside the DiT.
+    if 's2v' not in args.task and args.frame_num % 4 != 1:
+        raise ValueError(
+            f"--frame_num must be of the form 4n+1 (e.g. 5, 49, 81, 121); "
+            f"got {args.frame_num}.")
+
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
-    if not 's2v' in args.task:
-        assert args.size in SUPPORTED_SIZES[
-            args.
-            task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    for flag, val in (('--t5_fp32_compute', args.t5_fp32_compute),
+                      ('--t5_batch', args.t5_batch),
+                      ('--t5_cache', args.t5_cache)):
+        if val and args.task != 'ti2v-5B':
+            raise ValueError(
+                f"{flag} is currently implemented for ti2v-5B only, "
+                f"got task {args.task}.")
+
+    if args.t5_fp32_compute and not args.t5_cpu:
+        raise ValueError(
+            "--t5_fp32_compute only helps when T5 runs on CPU; pass --t5_cpu "
+            "or drop the flag.")
+
+    if args.vae_tile and args.task != 'ti2v-5B':
+        raise ValueError(
+            f"--vae_tile is currently implemented for ti2v-5B only, "
+            f"got task {args.task}.")
+
+    if args.dit_quant != 'none' and args.task != 'ti2v-5B':
+        raise ValueError(
+            f"--dit_quant is currently implemented for ti2v-5B only, "
+            f"got task {args.task}.")
+
+    if 's2v' not in args.task and args.size not in SUPPORTED_SIZES[args.task]:
+        raise ValueError(
+            f"Unsupported size {args.size} for task {args.task}. "
+            f"Supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}")
 
 
 def _parse_args():
@@ -216,6 +267,54 @@ def _parse_args():
         type=float,
         default=None,
         help="Classifier free guidance scale.")
+    parser.add_argument(
+        "--t5_fp32_compute",
+        action="store_true",
+        default=False,
+        help="Run T5's Linear layers in float32 while keeping bf16 weights "
+        "(ti2v-5B only). Only useful with --t5_cpu: bfloat16 matmul is "
+        "emulated on CPUs without AVX512-BF16/AMX and measures ~3.3x slower "
+        "than float32 there, at no extra memory.")
+    parser.add_argument(
+        "--t5_batch",
+        action="store_true",
+        default=False,
+        help="Encode the positive and negative prompt in one T5 forward "
+        "instead of two (ti2v-5B only). Not bit-identical to two calls.")
+    parser.add_argument(
+        "--t5_cache",
+        type=int,
+        default=0,
+        help="Size of the T5 prompt-embedding LRU (ti2v-5B only). 2 keeps the "
+        "negative prompt across generations within one process. 0 disables.")
+    parser.add_argument(
+        "--vae_tile",
+        action="store_true",
+        default=False,
+        help="Decode the VAE in overlapping spatial tiles (ti2v-5B only). "
+        "Bounds decoder peak memory by the tile instead of the frame. Off by "
+        "default: blending makes it non-bit-exact.")
+    parser.add_argument(
+        "--vae_tile_size",
+        type=int,
+        default=16,
+        help="VAE tile size in LATENT units (1 latent unit = 16 pixels).")
+    parser.add_argument(
+        "--vae_tile_overlap",
+        type=int,
+        default=8,
+        help="VAE tile overlap in LATENT units. Must cover the decoder's "
+        "receptive field or tiles show edge artifacts; must be < tile size.")
+    parser.add_argument(
+        "--dit_quant",
+        type=str,
+        default="none",
+        choices=list(QUANT_MODES),
+        help="Quantize the DiT transformer-block Linear weights to FP8 "
+        "(ti2v-5B only). 'none' (default) keeps upstream numerics exactly. "
+        "'fp8' is W8A8 with FP8 matmul; 'fp8_wo' stores FP8 weights and "
+        "computes in bf16. Both halve DiT weight memory and both visibly "
+        "change the generated video -- measure before relying on them.")
     parser.add_argument(
         "--convert_model_dtype",
         action="store_true",
@@ -437,7 +536,15 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            dit_quant=args.dit_quant,
+            t5_fp32_compute=args.t5_fp32_compute,
+            t5_batch=args.t5_batch,
+            t5_cache=args.t5_cache,
         )
+
+        if args.vae_tile:
+            wan_ti2v.vae.enable_tiling(
+                tile_size=args.vae_tile_size, overlap=args.vae_tile_overlap)
 
         logging.info(f"Generating video ...")
         video = wan_ti2v.generate(

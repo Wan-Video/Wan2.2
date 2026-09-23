@@ -6,6 +6,7 @@ import os
 import os.path as osp
 import shutil
 import subprocess
+import tempfile
 
 import imageio
 import torch
@@ -94,11 +95,20 @@ def save_video(tensor,
                nrow=8,
                normalize=True,
                value_range=(-1, 1)):
-    # cache file
-    cache_file = osp.join('/tmp', rand_name(
+    """
+    Write a video tensor to `save_file` and return the path written.
+
+    Raises on failure. This previously swallowed every exception and logged it
+    at INFO, so a failed write was indistinguishable from a successful one: the
+    CLI logged "Saving generated video to ..." and then exited 0 having produced
+    no file at all, after a full generation run.
+    """
+    # cache file. '/tmp' does not exist on Windows, which generate.py explicitly
+    # supports, so use the platform temp dir.
+    cache_file = osp.join(tempfile.gettempdir(), rand_name(
         suffix=suffix)) if save_file is None else save_file
 
-    # save to cache
+    writer = None
     try:
         # preprocess
         tensor = tensor.clamp(min(value_range), max(value_range))
@@ -116,8 +126,23 @@ def save_video(tensor,
         for frame in tensor.numpy():
             writer.append_data(frame)
         writer.close()
+        writer = None
     except Exception as e:
-        logging.info(f'save_video failed, error: {e}')
+        logging.error(f'save_video failed for {cache_file}: {e}')
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        # never leave a half-written file behind that looks like a result
+        if osp.exists(cache_file):
+            try:
+                os.remove(cache_file)
+            except OSError:
+                pass
+        raise
+
+    return cache_file
 
 
 def save_image(tensor, save_file, nrow=8, normalize=True, value_range=(-1, 1)):
@@ -139,7 +164,8 @@ def save_image(tensor, save_file, nrow=8, normalize=True, value_range=(-1, 1)):
             value_range=value_range)
         return save_file
     except Exception as e:
-        logging.info(f'save_image failed, error: {e}')
+        logging.error(f'save_image failed for {save_file}: {e}')
+        raise
 
 
 def str2bool(v):

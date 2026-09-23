@@ -2,7 +2,6 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -731,6 +730,36 @@ def count_conv3d(model):
     return count
 
 
+
+def _tile_spans(total, tile, overlap):
+    """Start/end pairs covering `total`, each at most `tile` wide."""
+    if tile <= 0 or tile >= total:
+        return [(0, total)]
+    stride = max(1, tile - overlap)
+    spans, start = [], 0
+    while True:
+        end = min(start + tile, total)
+        spans.append((start, end))
+        if end >= total:
+            break
+        start += stride
+    return spans
+
+
+def _feather_1d(length, left, right, like):
+    """Blend ramp that rises over `left` samples and falls over `right`."""
+    w = torch.ones(length, device=like.device, dtype=like.dtype)
+    left = min(left, length // 2)
+    right = min(right, length // 2)
+    if left > 0:
+        w[:left] = torch.linspace(
+            0., 1., left + 2, device=like.device, dtype=like.dtype)[1:-1]
+    if right > 0:
+        w[length - right:] = torch.linspace(
+            1., 0., right + 2, device=like.device, dtype=like.dtype)[1:-1]
+    return w
+
+
 class WanVAE_(nn.Module):
 
     def __init__(
@@ -785,21 +814,28 @@ class WanVAE_(nn.Module):
         x = patchify(x, patch_size=2)
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
+        # Collect the per-chunk outputs and concatenate once. Growing `out` with
+        # a torch.cat every iteration re-copied the whole accumulated result
+        # each time, which is quadratic in the number of chunks.
+        outs = []
         for i in range(iter_):
             self._enc_conv_idx = [0]
             if i == 0:
-                out = self.encoder(
-                    x[:, :, :1, :, :],
-                    feat_cache=self._enc_feat_map,
-                    feat_idx=self._enc_conv_idx,
-                )
+                outs.append(
+                    self.encoder(
+                        x[:, :, :1, :, :],
+                        feat_cache=self._enc_feat_map,
+                        feat_idx=self._enc_conv_idx,
+                    ))
             else:
-                out_ = self.encoder(
-                    x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
-                    feat_cache=self._enc_feat_map,
-                    feat_idx=self._enc_conv_idx,
-                )
-                out = torch.cat([out, out_], 2)
+                outs.append(
+                    self.encoder(
+                        x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
+                        feat_cache=self._enc_feat_map,
+                        feat_idx=self._enc_conv_idx,
+                    ))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs, 2)
+        del outs
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(
@@ -810,33 +846,94 @@ class WanVAE_(nn.Module):
         return mu
 
     def decode(self, z, scale):
-        self.clear_cache()
         if isinstance(scale[0], torch.Tensor):
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
                 1, self.z_dim, 1, 1, 1)
         else:
             z = z / scale[1] + scale[0]
+
+        tile = getattr(self, 'tile_size', 0)
+        if tile and tile > 0:
+            return self._decode_tiled(z, tile, getattr(self, 'tile_overlap', 0))
+        return self._decode_chunked(z)
+
+    def _decode_chunked(self, z):
+        """
+        Temporal-chunked decode of one (already rescaled) latent.
+
+        This is the original decode body. The temporal feat_cache makes the
+        chunk loop stateful, so every spatial tile has to run its own full pass
+        through here with a freshly cleared cache.
+        """
+        self.clear_cache()
         iter_ = z.shape[2]
         x = self.conv2(z)
+        # See encode(): accumulate then concatenate once. This is the hottest
+        # memory path in the whole pipeline -- the old incremental cat both
+        # copied the growing result on every frame and held the old and new
+        # buffers alive simultaneously at the final concatenation.
+        outs = []
         for i in range(iter_):
             self._conv_idx = [0]
-            if i == 0:
-                out = self.decoder(
+            outs.append(
+                self.decoder(
                     x[:, :, i:i + 1, :, :],
                     feat_cache=self._feat_map,
                     feat_idx=self._conv_idx,
-                    first_chunk=True,
-                )
-            else:
-                out_ = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
-                )
-                out = torch.cat([out, out_], 2)
+                    first_chunk=(i == 0),
+                ))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs, 2)
+        del outs
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
         return out
+
+    def _decode_tiled(self, z, tile_size, overlap):
+        """
+        Decode in overlapping spatial tiles and blend the seams.
+
+        The decoder holds its peak activation for a whole HxW plane at once, so
+        on a small card the full-frame decode is the memory spike of the entire
+        pipeline. Tiling trades a little recomputation in the overlap regions
+        for a peak that scales with the tile instead of the frame.
+
+        tile_size and overlap are in LATENT units; the decoder upsamples by a
+        fixed factor which is derived from the first tile rather than assumed.
+        """
+        _, _, _, H, W = z.shape
+        h_spans = _tile_spans(H, tile_size, overlap)
+        w_spans = _tile_spans(W, tile_size, overlap)
+        if len(h_spans) == 1 and len(w_spans) == 1:
+            return self._decode_chunked(z)
+
+        acc = None
+        wsum = None
+        up = None
+        for h0, h1 in h_spans:
+            for w0, w1 in w_spans:
+                tile = self._decode_chunked(z[:, :, :, h0:h1, w0:w1])
+                if acc is None:
+                    up = tile.shape[-2] // (h1 - h0)
+                    acc = tile.new_zeros(tile.shape[0], tile.shape[1],
+                                         tile.shape[2], H * up, W * up)
+                    wsum = tile.new_zeros(1, 1, 1, H * up, W * up)
+
+                th, tw = tile.shape[-2], tile.shape[-1]
+                # Feather only the edges that actually abut another tile, so
+                # the outer border of the frame keeps full weight.
+                mask = (_feather_1d(th, overlap * up if h0 > 0 else 0,
+                                    overlap * up if h1 < H else 0, tile).
+                        unsqueeze(1) *
+                        _feather_1d(tw, overlap * up if w0 > 0 else 0,
+                                    overlap * up if w1 < W else 0,
+                                    tile).unsqueeze(0))
+
+                oh, ow = h0 * up, w0 * up
+                acc[..., oh:oh + th, ow:ow + tw] += tile * mask
+                wsum[..., oh:oh + th, ow:ow + tw] += mask
+                del tile, mask
+
+        return acc / wsum.clamp(min=1e-6)
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
@@ -879,8 +976,12 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
 
     # load checkpoint
     logging.info(f"loading {pretrained_path}")
+    # weights_only=False is required: these are first-party Wan checkpoints
+    # saved in the legacy .tar format, which PyTorch 2.6+ refuses to load
+    # under its new weights_only=True default.
     model.load_state_dict(
-        torch.load(pretrained_path, map_location=device), assign=True)
+        torch.load(pretrained_path, map_location=device, weights_only=False),
+        assign=True)
 
     return model
 
@@ -1021,31 +1122,60 @@ class Wan2_2_VAE:
                 temperal_downsample=temperal_downsample,
             ).eval().requires_grad_(False).to(device))
 
+    def _autocast(self):
+        """
+        Run the VAE at self.dtype.
+
+        self.dtype defaults to float32, and torch autocast only accepts
+        float16/bfloat16 -- passing float32 made torch print "target dtype is
+        not supported. Disabling autocast" and silently turn autocast off. That
+        happened to give the intended fp32 VAE, but by accident and with a
+        warning on every call. Disable autocast explicitly instead, which also
+        keeps an enclosing bf16 autocast from reaching the VAE.
+        """
+        if self.dtype in (torch.float16, torch.bfloat16):
+            return torch.amp.autocast('cuda', dtype=self.dtype)
+        return torch.amp.autocast('cuda', enabled=False)
+
+    def enable_tiling(self, tile_size=16, overlap=4):
+        """
+        Decode in overlapping spatial tiles (sizes are in LATENT units).
+
+        Off by default. Tiling changes the result slightly in the blended
+        overlap regions, so measure before relying on it.
+        """
+        if overlap >= tile_size:
+            raise ValueError(
+                'overlap ({}) must be smaller than tile_size ({})'.format(
+                    overlap, tile_size))
+        self.model.tile_size = int(tile_size)
+        self.model.tile_overlap = int(overlap)
+
+    def disable_tiling(self):
+        self.model.tile_size = 0
+        self.model.tile_overlap = 0
+
     def encode(self, videos):
-        try:
-            if not isinstance(videos, list):
-                raise TypeError("videos should be a list")
-            with amp.autocast(dtype=self.dtype):
-                return [
-                    self.model.encode(u.unsqueeze(0),
-                                      self.scale).float().squeeze(0)
-                    for u in videos
-                ]
-        except TypeError as e:
-            logging.info(e)
-            return None
+        # NOTE: this used to wrap the body in `except TypeError: return None`,
+        # which swallowed any TypeError raised *inside* the encode and handed
+        # the caller a None that failed much later with a confusing
+        # 'NoneType' error. Validate the input, then let real errors propagate.
+        if not isinstance(videos, list):
+            raise TypeError('videos should be a list, got '
+                            '{}'.format(type(videos).__name__))
+        with self._autocast():
+            return [
+                self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0)
+                for u in videos
+            ]
 
     def decode(self, zs):
-        try:
-            if not isinstance(zs, list):
-                raise TypeError("zs should be a list")
-            with amp.autocast(dtype=self.dtype):
-                return [
-                    self.model.decode(u.unsqueeze(0),
-                                      self.scale).float().clamp_(-1,
-                                                                 1).squeeze(0)
-                    for u in zs
-                ]
-        except TypeError as e:
-            logging.info(e)
-            return None
+        if not isinstance(zs, list):
+            raise TypeError('zs should be a list, got '
+                            '{}'.format(type(zs).__name__))
+        with self._autocast():
+            return [
+                self.model.decode(u.unsqueeze(0),
+                                  self.scale).float().clamp_(-1, 1).squeeze(0)
+                for u in zs
+            ]
