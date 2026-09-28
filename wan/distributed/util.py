@@ -3,11 +3,41 @@ import torch
 import torch.distributed as dist
 
 
+def get_device_type() -> str:
+    """Device type of the active accelerator ('cpu' when there is none)."""
+    for name in ('cuda', 'npu', 'xpu', 'mps'):
+        backend = getattr(torch, name, None)
+        if backend is not None and backend.is_available():
+            return name
+    return 'cpu'
+
+
+def get_current_device():
+    """Current device of the active accelerator as a `torch.device` ('cpu' when there is none)."""
+    device_type = get_device_type()
+    if device_type == 'cpu':
+        return torch.device('cpu')
+    return torch.device(device_type, getattr(torch, device_type).current_device())
+
+
+def set_device(index: int) -> None:
+    """Bind the calling process to `index` on the active accelerator."""
+    device_type = get_device_type()
+    if device_type == 'cpu':
+        return
+    getattr(torch, device_type).set_device(index)
+
+
+def get_distributed_backend() -> str:
+    """Collective communication backend matching the active accelerator."""
+    return {'cuda': 'nccl', 'npu': 'hccl', 'xpu': 'xccl'}.get(get_device_type(), 'gloo')
+
+
 def init_distributed_group():
     """r initialize sequence parallel group.
     """
     if not dist.is_initialized():
-        dist.init_process_group(backend='nccl')
+        dist.init_process_group(backend=get_distributed_backend())
 
 
 def get_rank():
