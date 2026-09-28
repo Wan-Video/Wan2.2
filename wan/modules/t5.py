@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tokenizers import HuggingfaceTokenizer
 from ..distributed.util import get_current_device
+from .tokenizers import HuggingfaceTokenizer
 
 __all__ = [
     'T5Model',

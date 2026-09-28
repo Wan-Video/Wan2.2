@@ -16,7 +16,11 @@ from PIL import Image
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
-from wan.distributed.util import get_distributed_backend, init_distributed_group, set_device
+from wan.distributed.util import (
+    get_distributed_backend,
+    init_distributed_group,
+    set_device,
+)
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import merge_video_audio, save_video, str2bool
 
