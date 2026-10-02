@@ -334,7 +334,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         else:
             if self.config.prediction_type == "flow_prediction":
                 sigma_t = self.sigmas[self.step_index]
-                epsilon = sample - (1 - sigma_t) * model_output
+                epsilon = sample + (1 - sigma_t) * model_output
             else:
                 raise ValueError(
                     f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`,"
@@ -800,3 +800,4 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
+
