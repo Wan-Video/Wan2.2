@@ -252,6 +252,8 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                                  num_inference_steps +
                                  1).copy()[:-1]  # pyright: ignore
 
+        sigmas = np.asarray(sigmas)
+
         if self.config.use_dynamic_shifting:
             sigmas = self.time_shift(mu, 1.0, sigmas)  # pyright: ignore
         else:
@@ -857,3 +859,4 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
+
