@@ -42,9 +42,14 @@ def rope_apply(x, grid_sizes, freqs):
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
-    # loop over samples
+    grids = _rope_grid_sizes(grid_sizes)
+    if torch.compiler.is_compiling() and grids and all(
+            grid == grids[0] for grid in grids):
+        return _rope_apply_uniform(x, grids[0], freqs)
+
+    # Keep per-sample grids and padding behavior for heterogeneous batches.
     output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+    for i, (f, h, w) in enumerate(grids):
         seq_len = f * h * w
 
         # precompute multipliers
@@ -64,6 +69,34 @@ def rope_apply(x, grid_sizes, freqs):
         # append to collection
         output.append(x_i)
     return torch.stack(output).float()
+
+
+
+@torch.compiler.disable
+def _rope_grid_sizes(grid_sizes):
+    # Keep host shape values outside the tensor graph on older PyTorch versions.
+    return grid_sizes.tolist()
+
+
+def _rope_apply_uniform(x, grid, freqs):
+    """Rotate a uniform batch together, using real arithmetic for compilation."""
+    f, h, w = grid
+    seq_len = f * h * w
+    phases = (
+        freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+        freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+        freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
+    )
+    cos = torch.cat([phase.real for phase in phases], dim=-1).reshape(
+        seq_len, 1, -1)
+    sin = torch.cat([phase.imag for phase in phases], dim=-1).reshape(
+        seq_len, 1, -1)
+    # Promote before splitting so backward accumulation also stays in float64.
+    pairs = x[:, :seq_len].to(torch.float64).unflatten(-1, (-1, 2))
+    real, imag = pairs.unbind(-1)
+    rotated = torch.stack(
+        (real * cos - imag * sin, imag * cos + real * sin), dim=-1).flatten(-2)
+    return torch.cat((rotated, x[:, seq_len:]), dim=1).float()
 
 
 class WanRMSNorm(nn.Module):
