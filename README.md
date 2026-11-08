@@ -139,7 +139,7 @@ This repository supports the `Wan2.2-T2V-A14B` Text-to-Video model and can simul
 
 ##### (1) Without Prompt Extension
 
-To facilitate implementation, we will start with a basic version of the inference process that skips the [prompt extension](#2-using-prompt-extention) step.
+To facilitate implementation, we will start with a basic version of the inference process that skips the [prompt extension](#2-using-prompt-extension) step.
 
 - Single-GPU inference
 
@@ -217,7 +217,7 @@ DASH_API_KEY=your_key torchrun --nproc_per_node=8 generate.py --task i2v-A14B --
 
 > 💡The model can generate videos solely from the input image. You can use prompt extension to generate prompt from the image.
 
-> The process of prompt extension can be referenced [here](#2-using-prompt-extention).
+> The process of prompt extension can be referenced [here](#2-using-prompt-extension).
 
 #### Run Text-Image-to-Video Generation
 
@@ -252,7 +252,7 @@ python generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --
 torchrun --nproc_per_node=8 generate.py --task ti2v-5B --size 1280*704 --ckpt_dir ./Wan2.2-TI2V-5B --dit_fsdp --t5_fsdp --ulysses_size 8 --image examples/i2v_input.JPG --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
 ```
 
-> The process of prompt extension can be referenced [here](#2-using-prompt-extention).
+> The process of prompt extension can be referenced [here](#2-using-prompt-extension).
 
 #### Run Speech-to-Video Generation
 
@@ -346,13 +346,14 @@ python -m torch.distributed.run --nnodes 1 --nproc_per_node 8 generate.py --task
 * Diffusers Pipeline
 
 ```python
+import torch
 from diffusers import WanAnimatePipeline
 from diffusers.utils import export_to_video, load_image, load_video
 
 device = "cuda:0"
 dtype = torch.bfloat16
 model_id = "Wan-AI/Wan2.2-Animate-14B-Diffusers"
-pipe = WanAnimatePipeline.from_pretrained(model_id torch_dtype=dtype)
+pipe = WanAnimatePipeline.from_pretrained(model_id, torch_dtype=dtype)
 pipe.to(device)
 
 seed = 42
@@ -389,7 +390,7 @@ python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_roo
 * Multi-GPU inference using FSDP + DeepSpeed Ulysses
 
 ```bash
-python -m torch.distributed.run --nnodes 1 --nproc_per_node 8 generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/replace/process_results/src_pose.mp4  --refert_num 1 --replace_flag --use_relighting_lora --dit_fsdp --t5_fsdp --ulysses_size 8
+python -m torch.distributed.run --nnodes 1 --nproc_per_node 8 generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path ./examples/wan_animate/replace/process_results/ --refert_num 1 --replace_flag --use_relighting_lora --dit_fsdp --t5_fsdp --ulysses_size 8
 ```
 
 * Diffusers Pipeline
