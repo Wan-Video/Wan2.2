@@ -4,8 +4,8 @@ import binascii
 import logging
 import os
 import os.path as osp
-import shutil
 import subprocess
+import tempfile
 
 import imageio
 import torch
@@ -41,49 +41,46 @@ def merge_video_audio(video_path: str, audio_path: str):
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"audio file {audio_path} does not exist")
 
-    base, ext = os.path.splitext(video_path)
-    temp_output = f"{base}_temp{ext}"
-
     try:
-        # create ffmpeg command
-        command = [
-            'ffmpeg',
-            '-y',  # overwrite
-            '-i',
-            video_path,
-            '-i',
-            audio_path,
-            '-c:v',
-            'copy',  # copy video stream
-            '-c:a',
-            'aac',  # use AAC audio encoder
-            '-b:a',
-            '192k',  # set audio bitrate (optional)
-            '-map',
-            '0:v:0',  # select the first video stream
-            '-map',
-            '1:a:0',  # select the first audio stream
-            '-shortest',  # choose the shortest duration
-            temp_output
-        ]
+        # Stage alongside the destination for an atomic replacement.
+        with tempfile.TemporaryDirectory(dir=osp.dirname(osp.abspath(video_path))) as temp_dir:
+            temp_output = osp.join(temp_dir, osp.basename(video_path))
+            # create ffmpeg command
+            command = [
+                'ffmpeg',
+                '-y',  # overwrite
+                '-i',
+                video_path,
+                '-i',
+                audio_path,
+                '-c:v',
+                'copy',  # copy video stream
+                '-c:a',
+                'aac',  # use AAC audio encoder
+                '-b:a',
+                '192k',  # set audio bitrate (optional)
+                '-map',
+                '0:v:0',  # select the first video stream
+                '-map',
+                '1:a:0',  # select the first audio stream
+                '-shortest',  # choose the shortest duration
+                temp_output
+            ]
 
-        # execute the command
-        logging.info("Start merging video and audio...")
-        result = subprocess.run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            # execute the command
+            logging.info("Start merging video and audio...")
+            result = subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        # check result
-        if result.returncode != 0:
-            error_msg = f"FFmpeg execute failed: {result.stderr}"
-            logging.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        shutil.move(temp_output, video_path)
+            # check result
+            if result.returncode != 0:
+                error_msg = f"FFmpeg execute failed: {result.stderr}"
+                logging.error(error_msg)
+                raise RuntimeError(error_msg)
+            os.replace(temp_output, video_path)
         logging.info(f"Merge completed, saved to {video_path}")
 
     except Exception as e:
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
         logging.error(f"merge_video_audio failed with error: {e}")
 
 
