@@ -42,8 +42,10 @@ def rope_apply(x, grid_sizes, freqs):
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
+    # write results straight into the fp32 output (no extra cat/stack copies)
+    output = torch.empty_like(x, dtype=torch.float32)
+
     # loop over samples
-    output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
 
@@ -59,11 +61,11 @@ def rope_apply(x, grid_sizes, freqs):
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
 
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).float()
+        # write into output; padding tail is copied unchanged
+        output[i, :seq_len] = x_i
+        output[i, seq_len:] = x[i, seq_len:]
+    return output
 
 
 class WanRMSNorm(nn.Module):
