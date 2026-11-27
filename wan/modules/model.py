@@ -42,8 +42,10 @@ def rope_apply(x, grid_sizes, freqs):
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
+    # write results straight into the fp32 output (no extra cat/stack copies)
+    output = torch.empty_like(x, dtype=torch.float32)
+
     # loop over samples
-    output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
 
@@ -59,11 +61,11 @@ def rope_apply(x, grid_sizes, freqs):
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
 
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).float()
+        # write into output; padding tail is copied unchanged
+        output[i, :seq_len] = x_i
+        output[i, seq_len:] = x[i, seq_len:]
+    return output
 
 
 class WanRMSNorm(nn.Module):
@@ -458,13 +460,13 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # time embeddings
         if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
+            t = t.unsqueeze(1)  # [B, 1]: one timestep shared by all tokens, broadcast later
         with torch.amp.autocast('cuda', dtype=torch.float32):
-            bt = t.size(0)
+            bt, lt = t.shape
             t = t.flatten()
             e = self.time_embedding(
                 sinusoidal_embedding_1d(self.freq_dim,
-                                        t).unflatten(0, (bt, seq_len)).float())
+                                        t).unflatten(0, (bt, lt)).float())
             e0 = self.time_projection(e).unflatten(2, (6, self.dim))
             assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
